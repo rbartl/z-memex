@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/joho/godotenv"
+	"github.com/pressly/goose/v3"
 
 	"gitlab.com/zollneritsch/memex/internal/embeddings"
 	"gitlab.com/zollneritsch/memex/internal/extraction"
@@ -30,7 +33,14 @@ func main() {
 
 	ctx := context.Background()
 
-	pg, err := storage.NewPostgres(ctx, mustEnv("POSTGRES_URL"))
+	// Run database migrations before anything else.
+	pgURL := mustEnv("POSTGRES_URL")
+	if err := runMigrations(pgURL); err != nil {
+		slog.Error("failed to run migrations", "err", err)
+		os.Exit(1)
+	}
+
+	pg, err := storage.NewPostgres(ctx, pgURL)
 	if err != nil {
 		slog.Error("failed to connect to postgres", "err", err)
 		os.Exit(1)
@@ -85,6 +95,21 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutCtx)
+}
+
+func runMigrations(pgURL string) error {
+	db, err := sql.Open("pgx", pgURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	goose.SetDialect("postgres")
+	if err := goose.Up(db, "migrations"); err != nil {
+		return err
+	}
+	slog.Info("database migrations applied")
+	return nil
 }
 
 func mustEnv(key string) string {

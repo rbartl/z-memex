@@ -7,7 +7,6 @@ services:
       POSTGRES_DB: memex
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5433:5432" # expose locally for psql / debugging
     healthcheck:

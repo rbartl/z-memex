@@ -39,33 +39,47 @@ func (p *Postgres) SaveMemory(ctx context.Context, m *memory.Memory, embedding [
 		vec = &v
 	}
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO memories (id, content, summary, source, session_id, tags, embedding, importance, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO memories (id, content, content_hash, summary, source, session_id, tags, embedding, importance, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (id) DO UPDATE SET
-			content    = EXCLUDED.content,
-			summary    = EXCLUDED.summary,
-			source     = EXCLUDED.source,
-			session_id = EXCLUDED.session_id,
-			tags       = EXCLUDED.tags,
-			embedding  = EXCLUDED.embedding,
-			importance = EXCLUDED.importance,
-			updated_at = EXCLUDED.updated_at
-	`, m.ID, m.Content, m.Summary, m.Source, m.SessionID, m.Tags, vec, m.Importance, m.CreatedAt, m.UpdatedAt)
+			content      = EXCLUDED.content,
+			content_hash = EXCLUDED.content_hash,
+			summary      = EXCLUDED.summary,
+			source       = EXCLUDED.source,
+			session_id   = EXCLUDED.session_id,
+			tags         = EXCLUDED.tags,
+			embedding    = EXCLUDED.embedding,
+			importance   = EXCLUDED.importance,
+			updated_at   = EXCLUDED.updated_at
+	`, m.ID, m.Content, nilIfEmpty(m.ContentHash), m.Summary, m.Source, m.SessionID, m.Tags, vec, m.Importance, m.CreatedAt, m.UpdatedAt)
 	return err
+}
+
+func (p *Postgres) FindByContentHash(ctx context.Context, hash string) (*memory.Memory, error) {
+	row := p.pool.QueryRow(ctx, `
+		SELECT id, content, content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
+		FROM memories WHERE content_hash = $1
+	`, hash)
+	m := &memory.Memory{}
+	err := row.Scan(&m.ID, &m.Content, &m.ContentHash, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func (p *Postgres) GetMemory(ctx context.Context, id uuid.UUID) (*memory.Memory, error) {
 	row := p.pool.QueryRow(ctx, `
-		SELECT id, content, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
+		SELECT id, content, content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
 		FROM memories WHERE id = $1
 	`, id)
 	m := &memory.Memory{}
-	return m, row.Scan(&m.ID, &m.Content, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt)
+	return m, row.Scan(&m.ID, &m.Content, &m.ContentHash, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt)
 }
 
 func (p *Postgres) ListMemories(ctx context.Context, filter memory.Filter) ([]*memory.Memory, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, content, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
+		SELECT id, content, content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
 		FROM memories
 		WHERE ($1::text IS NULL OR source = $1)
 		  AND ($2::text[] IS NULL OR tags && $2)
@@ -80,7 +94,7 @@ func (p *Postgres) ListMemories(ctx context.Context, filter memory.Filter) ([]*m
 	var memories []*memory.Memory
 	for rows.Next() {
 		m := &memory.Memory{}
-		if err := rows.Scan(&m.ID, &m.Content, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Content, &m.ContentHash, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		memories = append(memories, m)
@@ -120,7 +134,7 @@ func (p *Postgres) DeleteMemory(ctx context.Context, id uuid.UUID) error {
 func (p *Postgres) SearchSimilar(ctx context.Context, embedding []float32, topK int, minScore float32) ([]memory.ScoredMemory, error) {
 	vec := pgvector.NewVector(embedding)
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, content, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at,
+		SELECT id, content, content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at,
 		       1 - (embedding <=> $1) AS score
 		FROM memories
 		WHERE embedding IS NOT NULL
@@ -138,7 +152,7 @@ func (p *Postgres) SearchSimilar(ctx context.Context, embedding []float32, topK 
 		m := &memory.Memory{}
 		var score float32
 		if err := rows.Scan(
-			&m.ID, &m.Content, &m.Summary, &m.Source, &m.SessionID,
+			&m.ID, &m.Content, &m.ContentHash, &m.Summary, &m.Source, &m.SessionID,
 			&m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt, &score,
 		); err != nil {
 			return nil, err
@@ -159,7 +173,7 @@ func (p *Postgres) SearchHybrid(ctx context.Context, embedding []float32, topK i
 
 	rows, err := p.pool.Query(ctx, `
 		WITH candidates AS (
-			SELECT id, content, summary, source, session_id, tags,
+			SELECT id, content, content_hash, summary, source, session_id, tags,
 			       importance, access_count, last_accessed_at, created_at, updated_at,
 			       1 - (embedding <=> $1) AS cosine_score
 			FROM memories
@@ -168,7 +182,7 @@ func (p *Postgres) SearchHybrid(ctx context.Context, embedding []float32, topK i
 			ORDER BY embedding <=> $1
 			LIMIT $2
 		)
-		SELECT id, content, summary, source, session_id, tags,
+		SELECT id, content, content_hash, summary, source, session_id, tags,
 		       importance, access_count, last_accessed_at, created_at, updated_at,
 		       (
 		           $5 * cosine_score
@@ -192,7 +206,7 @@ func (p *Postgres) SearchHybrid(ctx context.Context, embedding []float32, topK i
 		m := &memory.Memory{}
 		var score float32
 		if err := rows.Scan(
-			&m.ID, &m.Content, &m.Summary, &m.Source, &m.SessionID,
+			&m.ID, &m.Content, &m.ContentHash, &m.Summary, &m.Source, &m.SessionID,
 			&m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt, &score,
 		); err != nil {
 			return nil, err
@@ -345,7 +359,7 @@ func (p *Postgres) GetFullGraph(ctx context.Context) (*memory.Graph, error) {
 
 func (p *Postgres) GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*memory.Memory, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT m.id, m.content, m.summary, m.source, m.session_id, m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at
+		SELECT m.id, m.content, m.content_hash, m.summary, m.source, m.session_id, m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at
 		FROM memories m
 		JOIN memory_entities me ON me.memory_id = m.id
 		WHERE me.entity_id = $1
@@ -359,7 +373,7 @@ func (p *Postgres) GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) 
 	var memories []*memory.Memory
 	for rows.Next() {
 		m := &memory.Memory{}
-		if err := rows.Scan(&m.ID, &m.Content, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Content, &m.ContentHash, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		memories = append(memories, m)
@@ -387,7 +401,7 @@ func (p *Postgres) GetEntityTypes(ctx context.Context) ([]string, error) {
 func (p *Postgres) GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]memory.RelatedMemory, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT
-			m.id, m.content, m.summary, m.source, m.session_id, m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
+			m.id, m.content, m.content_hash, m.summary, m.source, m.session_id, m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
 			e.id AS entity_id, e.name AS entity_name, e.entity_type
 		FROM memory_entities me1
 		JOIN memory_entities me2 ON me2.entity_id = me1.entity_id AND me2.memory_id != me1.memory_id
@@ -413,7 +427,7 @@ func (p *Postgres) GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) (
 	for rows.Next() {
 		m := &memory.Memory{}
 		var ent memory.Entity
-		if err := rows.Scan(&m.ID, &m.Content, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt, &ent.ID, &ent.Name, &ent.Type); err != nil {
+		if err := rows.Scan(&m.ID, &m.Content, &m.ContentHash, &m.Summary, &m.Source, &m.SessionID, &m.Tags, &m.Importance, &m.AccessCount, &m.LastAccessedAt, &m.CreatedAt, &m.UpdatedAt, &ent.ID, &ent.Name, &ent.Type); err != nil {
 			return nil, err
 		}
 		if e, ok := index[m.ID]; ok {

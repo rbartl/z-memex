@@ -9,6 +9,7 @@ import (
 type Memory struct {
 	ID             uuid.UUID  `json:"id"`
 	Content        string     `json:"content"`
+	ContentHash    string     `json:"content_hash,omitempty"`
 	Summary        string     `json:"summary,omitempty"`
 	Source         string     `json:"source,omitempty"` // which tool/agent stored this
 	SessionID      string     `json:"session_id,omitempty"`
@@ -42,9 +43,9 @@ type EntityGroup struct {
 }
 
 type StoreResult struct {
-	Memory    *Memory `json:"memory"`
-	Duplicate bool    `json:"duplicate"`
-	Score     float32 `json:"score,omitempty"` // similarity score if duplicate
+	Memory *Memory `json:"memory"`
+	Action string  `json:"action"`          // "created", "merged", "updated", "skipped"
+	Score  float32 `json:"score,omitempty"` // similarity score if not created
 }
 
 // Graph types

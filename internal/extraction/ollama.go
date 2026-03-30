@@ -109,6 +109,37 @@ func (o *Ollama) Extract(ctx context.Context, content string, knownTypes []strin
 	return &result, nil
 }
 
+const ollamaMergePrompt = `You are a knowledge base assistant. Merge these two pieces of knowledge into one concise statement. Preserve ALL unique facts. Remove redundancy. Return ONLY the merged text as a JSON object: {"merged": "..."}
+
+Existing memory:
+%s
+
+New information:
+%s`
+
+func (o *Ollama) MergeMemories(ctx context.Context, existing, incoming string) (string, error) {
+	slog.Info("ollama merge starting", "model", o.model)
+	prompt := fmt.Sprintf(ollamaMergePrompt, existing, incoming)
+	resp, err := o.generate(ctx, prompt)
+	if err != nil {
+		return "", fmt.Errorf("ollama merge: %w", err)
+	}
+	if resp.Response == "" {
+		return incoming, nil
+	}
+	var result struct {
+		Merged string `json:"merged"`
+	}
+	if err := json.Unmarshal([]byte(resp.Response), &result); err != nil {
+		// If JSON parsing fails, return the raw response trimmed.
+		return resp.Response, nil
+	}
+	if result.Merged == "" {
+		return incoming, nil
+	}
+	return result.Merged, nil
+}
+
 func (o *Ollama) ExtractCrossRelations(ctx context.Context, contentA, contentB string, knownTypes []string) ([]memory.ExtractedRelation, error) {
 	slog.Info("ollama cross-relation starting", "model", o.model, "content_a_len", len(contentA), "content_b_len", len(contentB))
 

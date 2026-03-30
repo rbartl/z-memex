@@ -122,6 +122,40 @@ func (a *Anthropic) Extract(ctx context.Context, content string, knownTypes []st
 	return &result, nil
 }
 
+const mergePrompt = `You are a knowledge base assistant. You have an existing memory and new incoming information about the same topic. Merge them into a single, concise statement that:
+- Preserves ALL unique facts from both texts
+- Removes redundancy and duplication
+- Keeps the tone factual and self-contained
+- Does NOT add any information not present in either text
+
+Return ONLY the merged text, no explanation or formatting.
+
+Existing memory:
+%s
+
+New information:
+%s
+
+Merged result:`
+
+func (a *Anthropic) MergeMemories(ctx context.Context, existing, incoming string) (string, error) {
+	prompt := fmt.Sprintf(mergePrompt, existing, incoming)
+	msg, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeHaiku4_5,
+		MaxTokens: 2048,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("anthropic merge: %w", err)
+	}
+	if len(msg.Content) == 0 {
+		return incoming, nil
+	}
+	return strings.TrimSpace(msg.Content[0].Text), nil
+}
+
 func (a *Anthropic) ExtractCrossRelations(ctx context.Context, contentA, contentB string, knownTypes []string) ([]memory.ExtractedRelation, error) {
 	prompt := buildCrossRelationPrompt(knownTypes, contentA, contentB)
 

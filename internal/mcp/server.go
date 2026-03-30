@@ -324,13 +324,18 @@ func (s *Server) toolStoreMemory(ctx context.Context, args map[string]any) (any,
 		return nil, err
 	}
 
-	if result.Duplicate {
-		slog.Info("updated existing memory", "id", result.Memory.ID, "score", result.Score)
-		return toolResult(fmt.Sprintf("Similar memory already existed (similarity: %.2f). Updated existing memory ID: %s with new content. Relationship extraction running in background.", result.Score, result.Memory.ID)), nil
-	}
+	slog.Info("stored memory", "id", result.Memory.ID, "action", result.Action, "source", source)
 
-	slog.Info("stored memory", "id", result.Memory.ID, "source", source)
-	return toolResult(fmt.Sprintf("Memory stored. ID: %s. Relationship extraction running in background.", result.Memory.ID)), nil
+	switch result.Action {
+	case "skipped":
+		return toolResult(fmt.Sprintf("Exact duplicate already exists. Memory ID: %s (no changes made).", result.Memory.ID)), nil
+	case "merged":
+		return toolResult(fmt.Sprintf("Merged with existing memory (similarity: %.2f). Memory ID: %s. Content combined to preserve all unique facts. Relationship extraction running in background.", result.Score, result.Memory.ID)), nil
+	case "updated":
+		return toolResult(fmt.Sprintf("Updated near-identical memory (similarity: %.2f). Memory ID: %s. Relationship extraction running in background.", result.Score, result.Memory.ID)), nil
+	default:
+		return toolResult(fmt.Sprintf("Memory stored. ID: %s. Relationship extraction running in background.", result.Memory.ID)), nil
+	}
 }
 
 func (s *Server) toolRecallMemory(ctx context.Context, args map[string]any) (any, error) {

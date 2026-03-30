@@ -2,12 +2,16 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type Embedder interface {
@@ -17,11 +21,13 @@ type Embedder interface {
 type Extractor interface {
 	Extract(ctx context.Context, content string, knownTypes []string) (*ExtractionResult, error)
 	ExtractCrossRelations(ctx context.Context, contentA, contentB string, knownTypes []string) ([]ExtractedRelation, error)
+	MergeMemories(ctx context.Context, existing, incoming string) (string, error)
 }
 
 // Store is the single storage interface — handles both relational data and vector search.
 type Store interface {
 	SaveMemory(ctx context.Context, m *Memory, embedding []float32) error
+	FindByContentHash(ctx context.Context, hash string) (*Memory, error)
 	GetMemory(ctx context.Context, id uuid.UUID) (*Memory, error)
 	ListMemories(ctx context.Context, filter Filter) ([]*Memory, error)
 	DeleteMemory(ctx context.Context, id uuid.UUID) error
@@ -49,16 +55,47 @@ func NewService(store Store, embed Embedder, extract Extractor) *Service {
 	return &Service{store: store, embed: embed, extract: extract}
 }
 
-const duplicateThreshold = 0.95
+const (
+	mergeThresholdLow  = 0.85 // below this: insert as new
+	mergeThresholdHigh = 0.99 // above this: update in place (near-identical)
+)
 
-// StoreMemory embeds + saves, then asynchronously extracts relations.
-// If a near-identical memory already exists (cosine similarity > 0.95), it updates
-// the existing memory in-place with the new content instead of creating a duplicate.
+// hashContent returns a SHA-256 hex digest of normalized (trimmed + lowered) content.
+func hashContent(content string) string {
+	normalized := strings.ToLower(strings.TrimSpace(content))
+	h := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(h[:])
+}
+
+// StoreMemory embeds + saves with three-tier dedup:
+//   - Exact hash match → skip (no embedding, no save)
+//   - Cosine 0.85–0.99 → LLM-assisted merge
+//   - Cosine ≥ 0.99 → update in place
+//   - Below 0.85 → insert as new memory
+//
 // importance should be 1-5 (3=normal). Pass 0 to use the default (3).
 func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID string, tags []string, importance int) (*StoreResult, error) {
 	if importance < 1 || importance > 5 {
 		importance = 3
 	}
+
+	hash := hashContent(content)
+
+	// Tier 1: exact content hash match — skip entirely.
+	existing, err := s.store.FindByContentHash(ctx, hash)
+	if err == nil && existing != nil {
+		slog.Info("exact duplicate skipped", "id", existing.ID)
+		return &StoreResult{
+			Memory: existing,
+			Action: "skipped",
+			Score:  1.0,
+		}, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		slog.Warn("content hash lookup failed, proceeding", "err", err)
+	}
+
+	// Embed the content for semantic comparison.
 	vec, err := s.embed.Embed(ctx, content)
 	if err != nil {
 		return nil, fmt.Errorf("embed: %w", err)
@@ -66,13 +103,52 @@ func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID st
 
 	now := time.Now()
 
-	// Check for duplicates — if found, update in-place.
-	existing, err := s.store.SearchSimilar(ctx, vec, 1, 0)
+	// Tier 2/3: check cosine similarity.
+	similar, err := s.store.SearchSimilar(ctx, vec, 1, 0)
 	if err != nil {
 		slog.Warn("duplicate check failed, proceeding with insert", "err", err)
-	} else if len(existing) > 0 && existing[0].Score > duplicateThreshold {
-		m := existing[0].Memory
-		m.Content = content
+	} else if len(similar) > 0 && similar[0].Score >= mergeThresholdLow {
+		m := similar[0].Memory
+		score := similar[0].Score
+
+		if score >= mergeThresholdHigh {
+			// Tier 2a: near-identical — update in place.
+			m.Content = content
+			m.ContentHash = hash
+			if source != "" {
+				m.Source = source
+			}
+			if sessionID != "" {
+				m.SessionID = sessionID
+			}
+			if len(tags) > 0 {
+				m.Tags = tags
+			}
+			m.Importance = importance
+			m.UpdatedAt = now
+
+			if err := s.store.SaveMemory(ctx, m, vec); err != nil {
+				return nil, fmt.Errorf("update existing memory: %w", err)
+			}
+			s.asyncExtractAndConnect(m, vec)
+			return &StoreResult{Memory: m, Action: "updated", Score: score}, nil
+		}
+
+		// Tier 2b: merge zone — LLM merges old + new content.
+		merged, err := s.extract.MergeMemories(ctx, m.Content, content)
+		if err != nil {
+			slog.Warn("merge failed, falling back to update", "err", err)
+			merged = content
+		}
+
+		// Re-embed the merged content.
+		mergedVec, err := s.embed.Embed(ctx, merged)
+		if err != nil {
+			return nil, fmt.Errorf("embed merged: %w", err)
+		}
+
+		m.Content = merged
+		m.ContentHash = hashContent(merged)
 		if source != "" {
 			m.Source = source
 		}
@@ -85,41 +161,35 @@ func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID st
 		m.Importance = importance
 		m.UpdatedAt = now
 
-		if err := s.store.SaveMemory(ctx, m, vec); err != nil {
-			return nil, fmt.Errorf("update existing memory: %w", err)
+		if err := s.store.SaveMemory(ctx, m, mergedVec); err != nil {
+			return nil, fmt.Errorf("save merged memory: %w", err)
 		}
-
-		go func() {
-			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			if err := s.extractAndGraph(bgCtx, m); err != nil {
-				slog.Warn("relation extraction failed", "memory_id", m.ID, "err", err)
-			}
-			s.crossConnect(bgCtx, m, vec)
-		}()
-
-		return &StoreResult{
-			Memory:    m,
-			Duplicate: true,
-			Score:     existing[0].Score,
-		}, nil
+		s.asyncExtractAndConnect(m, mergedVec)
+		return &StoreResult{Memory: m, Action: "merged", Score: score}, nil
 	}
 
+	// Tier 4: distinct — insert as new memory.
 	m := &Memory{
-		ID:         uuid.New(),
-		Content:    content,
-		Source:     source,
-		SessionID:  sessionID,
-		Tags:       tags,
-		Importance: importance,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:          uuid.New(),
+		Content:     content,
+		ContentHash: hash,
+		Source:      source,
+		SessionID:   sessionID,
+		Tags:        tags,
+		Importance:  importance,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	if err := s.store.SaveMemory(ctx, m, vec); err != nil {
 		return nil, fmt.Errorf("save memory: %w", err)
 	}
+	s.asyncExtractAndConnect(m, vec)
+	return &StoreResult{Memory: m, Action: "created"}, nil
+}
 
+// asyncExtractAndConnect runs entity extraction and cross-connection in the background.
+func (s *Service) asyncExtractAndConnect(m *Memory, vec []float32) {
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
@@ -128,8 +198,6 @@ func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID st
 		}
 		s.crossConnect(bgCtx, m, vec)
 	}()
-
-	return &StoreResult{Memory: m}, nil
 }
 
 func (s *Service) extractAndGraph(ctx context.Context, m *Memory) error {

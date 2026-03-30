@@ -50,6 +50,8 @@ func (p *Postgres) SaveMemory(ctx context.Context, m *memory.Memory, embedding [
 			tags         = EXCLUDED.tags,
 			embedding    = EXCLUDED.embedding,
 			importance   = EXCLUDED.importance,
+			access_count = memories.access_count,
+			last_accessed_at = memories.last_accessed_at,
 			updated_at   = EXCLUDED.updated_at
 	`, m.ID, m.Content, nilIfEmpty(m.ContentHash), m.Summary, m.Source, m.SessionID, m.Tags, vec, m.Importance, m.CreatedAt, m.UpdatedAt)
 	return err

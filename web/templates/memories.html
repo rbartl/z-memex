@@ -1,8 +1,5 @@
-{{ define "memories.html" }}
-{{ template "layout" . }}
-{{ end }}
-
-{{ define "content" }}
+{{ define "memories.html" }} {{ template "layout" . }} {{ end }} {{ define
+"content" }}
 <h1>Memories</h1>
 
 <input
@@ -14,7 +11,7 @@
     hx-trigger="input changed delay:300ms, search"
     hx-target="#memory-list"
     hx-indicator="#search-spinner"
->
+/>
 <span id="search-spinner" class="htmx-indicator">Searching...</span>
 
 <table>
@@ -23,6 +20,8 @@
             <th>Content</th>
             <th>Source</th>
             <th>Tags</th>
+            <th>Importance</th>
+            <th>Accesses</th>
             <th>Created</th>
         </tr>
     </thead>

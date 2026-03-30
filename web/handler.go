@@ -49,6 +49,20 @@ func NewHandler(svc MemoryService, templateDir, username, password string) *Hand
 			b, _ := json.Marshal(v)
 			return template.JS(b)
 		},
+		"importanceLabel": func(level int) string {
+			switch level {
+			case 1:
+				return "low"
+			case 2:
+				return "below normal"
+			case 4:
+				return "high"
+			case 5:
+				return "critical"
+			default:
+				return "normal"
+			}
+		},
 		"entityColor": func(entityType string) string {
 			colors := map[string]string{
 				"person":       "#6c8aff",

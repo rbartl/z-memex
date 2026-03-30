@@ -1,14 +1,23 @@
-{{ define "memory_rows.html" }}
-{{ if .Memories }}
-{{ range .Memories }}
+{{ define "memory_rows.html" }} {{ if .Memories }} {{ range .Memories }}
 <tr onclick="window.location='/ui/memories/{{ .ID }}'">
-    <td>{{ if .Summary }}{{ truncate .Summary 80 }}{{ else }}{{ truncate .Content 80 }}{{ end }}</td>
-    <td>{{ if .Source }}<span class="source-badge">{{ .Source }}</span>{{ end }}</td>
+    <td>
+        {{ if .Summary }}{{ truncate .Summary 80 }}{{ else }}{{ truncate
+        .Content 80 }}{{ end }}
+    </td>
+    <td>
+        {{ if .Source }}<span class="source-badge">{{ .Source }}</span>{{ end }}
+    </td>
     <td>{{ range .Tags }}<span class="tag">{{ . }}</span>{{ end }}</td>
+    <td>
+        <span class="tag importance-{{ .Importance }}"
+            >{{ importanceLabel .Importance }}</span
+        >
+    </td>
+    <td>{{ .AccessCount }}</td>
     <td>{{ .CreatedAt.Format "2006-01-02 15:04" }}</td>
 </tr>
-{{ end }}
-{{ else }}
-<tr><td colspan="4" class="empty">No memories found.</td></tr>
-{{ end }}
-{{ end }}
+{{ end }} {{ else }}
+<tr>
+    <td colspan="6" class="empty">No memories found.</td>
+</tr>
+{{ end }} {{ end }}

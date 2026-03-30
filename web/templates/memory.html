@@ -1,0 +1,93 @@
+{{ define "memory.html" }}
+{{ template "layout" . }}
+{{ end }}
+
+{{ define "content" }}
+<a href="/ui" class="back-link">&larr; Back to memories</a>
+
+<div class="card" x-data="{ confirmDelete: false }">
+    <div class="meta-grid" style="margin-bottom: 1.5rem;">
+        <div>
+            <div class="label">ID</div>
+            <div class="value" style="font-family: monospace; font-size: 0.8rem;">{{ .Memory.ID }}</div>
+        </div>
+        <div>
+            <div class="label">Source</div>
+            <div class="value">{{ if .Memory.Source }}<span class="source-badge">{{ .Memory.Source }}</span>{{ else }}-{{ end }}</div>
+        </div>
+        <div>
+            <div class="label">Session</div>
+            <div class="value" style="font-size: 0.85rem;">{{ if .Memory.SessionID }}{{ .Memory.SessionID }}{{ else }}-{{ end }}</div>
+        </div>
+        <div>
+            <div class="label">Created</div>
+            <div class="value">{{ .Memory.CreatedAt.Format "2006-01-02 15:04:05" }}</div>
+        </div>
+        <div>
+            <div class="label">Updated</div>
+            <div class="value">{{ .Memory.UpdatedAt.Format "2006-01-02 15:04:05" }}</div>
+        </div>
+        <div>
+            <div class="label">Tags</div>
+            <div class="value">{{ range .Memory.Tags }}<span class="tag">{{ . }}</span>{{ end }}{{ if not .Memory.Tags }}-{{ end }}</div>
+        </div>
+    </div>
+
+    {{ if .Memory.Summary }}
+    <div class="label">Summary</div>
+    <div class="value" style="color: var(--accent); margin-bottom: 1.5rem;">{{ .Memory.Summary }}</div>
+    {{ end }}
+
+    <div class="label">Content</div>
+    <div class="value">{{ .Memory.Content }}</div>
+
+    <div style="margin-top: 1.5rem; display: flex; gap: 0.5rem;">
+        <template x-if="!confirmDelete">
+            <button class="btn btn-danger" @click="confirmDelete = true">Delete</button>
+        </template>
+        <template x-if="confirmDelete">
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <span style="color: var(--danger); font-size: 0.85rem;">Are you sure?</span>
+                <button
+                    class="btn btn-danger"
+                    hx-delete="/ui/memories/{{ .Memory.ID }}"
+                    hx-confirm=""
+                >Yes, delete</button>
+                <button class="btn btn-secondary" @click="confirmDelete = false">Cancel</button>
+            </div>
+        </template>
+    </div>
+</div>
+
+{{ if .EntityGroups }}
+<div class="card">
+    <h2>Connected Memories</h2>
+    {{ range .EntityGroups }}
+    <div style="margin-bottom: 1.25rem;">
+        <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem;">
+            <span style="
+                display:inline-block;
+                width:8px; height:8px; border-radius:50%;
+                background:{{ entityColor .Entity.Type }};
+                flex-shrink:0;
+            "></span>
+            <span style="font-weight:600; font-size:0.9rem;">{{ .Entity.Name }}</span>
+            <span style="font-size:0.75rem; color:var(--text-dim);">{{ .Entity.Type }}</span>
+        </div>
+        {{ range .Memories }}
+        <a href="/ui/memories/{{ .ID }}" style="
+            display:block; text-decoration:none; color:inherit;
+            padding:0.5rem 0.75rem; margin-left:1rem;
+            border-left:2px solid var(--border);
+            margin-bottom:0.25rem;
+            font-size:0.875rem;
+            transition:border-color 0.15s;
+        " onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+            {{ if .Summary }}{{ .Summary }}{{ else }}{{ truncate .Content 120 }}{{ end }}
+        </a>
+        {{ end }}
+    </div>
+    {{ end }}
+</div>
+{{ end }}
+{{ end }}

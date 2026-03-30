@@ -1,0 +1,293 @@
+{{ define "graph.html" }} {{ template "layout" . }} {{ end }} {{ define
+"content" }}
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;">
+    <h1 style="margin-bottom:0;">Knowledge Graph</h1>
+    <button id="presentation-toggle" class="btn btn-secondary" onclick="togglePresentation()">
+        Presentation Mode
+    </button>
+</div>
+<input
+    class="search-bar"
+    type="search"
+    id="entity-search"
+    placeholder="Search for an entity (e.g. Go, PostgreSQL, user preference)..."
+/>
+<div id="graph-container">
+    <div id="graph-legend" style="
+        position:absolute; bottom:1rem; left:1rem;
+        background:rgba(15,17,23,0.85);
+        border:1px solid var(--border);
+        border-radius:6px;
+        padding:0.5rem 0.75rem;
+        font-size:0.75rem;
+        pointer-events:none;
+        display:none;
+    "></div>
+</div>
+
+<script src="/ui/static/vendor/d3.min.js"></script>
+<script>
+    let presentationMode = false;
+
+    function togglePresentation() {
+        presentationMode = !presentationMode;
+        const btn = document.getElementById("presentation-toggle");
+        if (presentationMode) {
+            btn.textContent = "Exit Presentation Mode";
+            btn.style.background = "var(--accent)";
+            btn.style.color = "white";
+        } else {
+            btn.textContent = "Presentation Mode";
+            btn.style.background = "";
+            btn.style.color = "";
+        }
+        // Update labels without re-fetching data
+        d3.selectAll(".node-label").text((d) => presentationMode ? anonLabel(d) : d.name);
+        d3.selectAll(".edge-label").style("opacity", presentationMode ? "0" : "1");
+        document.getElementById("graph-legend").style.display = presentationMode ? "none" : "block";
+        d3.selectAll("circle title").text((d) => {
+            if (presentationMode) return d.type;
+            const count = d._connectionCount || 0;
+            return d.name + " (" + d.type + ", " + count + " connections)";
+        });
+    }
+
+    function anonLabel(d) {
+        return d.type.charAt(0).toUpperCase() + d.type.slice(1) + " #" + d._anonId;
+    }
+
+    (function () {
+        const container = document.getElementById("graph-container");
+        const searchInput = document.getElementById("entity-search");
+
+        const colors = {
+            person: "#6c8aff",
+            project: "#ff9f43",
+            technology: "#54e0c7",
+            concept: "#a78bfa",
+            organization: "#f472b6",
+            tool: "#fbbf24",
+            file: "#8b8fa3",
+        };
+
+        function typeColor(type) {
+            return colors[type] || "#94a3b8";
+        }
+
+        function updateLegend(nodes) {
+            const legend = document.getElementById("graph-legend");
+            const types = [...new Set(nodes.map((n) => n.type))].sort();
+            if (types.length === 0) { legend.style.display = "none"; return; }
+            legend.style.display = "block";
+            legend.innerHTML = types.map((t) => `
+                <div style="display:flex;align-items:center;gap:0.4rem;padding:0.15rem 0;">
+                    <span style="width:8px;height:8px;border-radius:50%;background:${typeColor(t)};flex-shrink:0;display:inline-block;"></span>
+                    <span style="color:var(--text-dim)">${t}</span>
+                </div>`).join("");
+        }
+
+        let debounceTimer;
+        searchInput.addEventListener("input", function () {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => loadGraph(this.value), 400);
+        });
+
+        // Load full graph on page load
+        loadGraph("");
+
+        function loadGraph(entity) {
+            const url = entity.trim()
+                ? "/ui/graph/data?entity=" + encodeURIComponent(entity)
+                : "/ui/graph/data";
+
+            fetch(url)
+                .then((r) => r.json())
+                .then((data) => renderGraph(data))
+                .catch((err) => console.error("Graph load failed:", err));
+        }
+
+        function renderGraph(data) {
+            d3.select("#graph-container").select("svg").remove();
+
+            if (!data.nodes || data.nodes.length === 0) {
+                d3.select("#graph-container")
+                    .append("div")
+                    .style("display", "flex")
+                    .style("align-items", "center")
+                    .style("justify-content", "center")
+                    .style("height", "100%")
+                    .style("color", "#8b8fa3")
+                    .text("No entities found.");
+                return;
+            }
+
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            const svg = d3
+                .select("#graph-container")
+                .append("svg")
+                .attr("viewBox", [0, 0, width, height]);
+
+            const g = svg.append("g");
+
+            // Zoom
+            svg.call(
+                d3
+                    .zoom()
+                    .scaleExtent([0.2, 4])
+                    .on("zoom", (event) =>
+                        g.attr("transform", event.transform),
+                    ),
+            );
+
+            // Build node/link data
+            const nodeMap = {};
+            // Track per-type counters for stable anon IDs
+            const typeCounters = {};
+            const nodes = data.nodes.map((n) => {
+                typeCounters[n.type] = (typeCounters[n.type] || 0) + 1;
+                const node = { id: n.id, name: n.name, type: n.type, _anonId: typeCounters[n.type] };
+                nodeMap[n.id] = node;
+                return node;
+            });
+
+            const links = (data.edges || [])
+                .map((e) => ({
+                    source: nodes.find((n) => n.name === e.from) || nodes[0],
+                    target: nodes.find((n) => n.name === e.to) || nodes[0],
+                    label: e.relationship,
+                }))
+                .filter((l) => l.source && l.target);
+
+            // Count connections per node for sizing
+            const connectionCount = {};
+            nodes.forEach((n) => (connectionCount[n.name] = 0));
+            links.forEach((l) => {
+                const srcName =
+                    typeof l.source === "object" ? l.source.name : l.source;
+                const tgtName =
+                    typeof l.target === "object" ? l.target.name : l.target;
+                connectionCount[srcName] = (connectionCount[srcName] || 0) + 1;
+                connectionCount[tgtName] = (connectionCount[tgtName] || 0) + 1;
+            });
+            // Attach connection count to nodes for tooltip toggling
+            nodes.forEach((n) => { n._connectionCount = connectionCount[n.name] || 0; });
+
+            // Radius: min 6, max 24, scaled by connection count
+            const maxConn = Math.max(1, ...Object.values(connectionCount));
+            function nodeRadius(d) {
+                const count = connectionCount[d.name] || 0;
+                return 6 + (count / maxConn) * 18;
+            }
+
+            const simulation = d3
+                .forceSimulation(nodes)
+                .force("link", d3.forceLink(links).distance(120).strength(0.5))
+                .force("charge", d3.forceManyBody().strength(-300))
+                .force("center", d3.forceCenter(width / 2, height / 2))
+                .force(
+                    "collision",
+                    d3.forceCollide().radius((d) => nodeRadius(d) + 4),
+                );
+
+            // Edges
+            const link = g
+                .append("g")
+                .selectAll("line")
+                .data(links)
+                .join("line")
+                .attr("stroke", "#2a2d3a")
+                .attr("stroke-width", 1.5);
+
+            // Edge labels
+            const linkLabel = g
+                .append("g")
+                .selectAll("text")
+                .data(links)
+                .join("text")
+                .attr("class", "edge-label")
+                .attr("text-anchor", "middle")
+                .text((d) => d.label);
+
+            // Nodes
+            const node = g
+                .append("g")
+                .selectAll("circle")
+                .data(nodes)
+                .join("circle")
+                .attr("r", (d) => nodeRadius(d))
+                .attr("fill", (d) => typeColor(d.type))
+                .attr("stroke", "#0f1117")
+                .attr("stroke-width", 2)
+                .style("cursor", "pointer")
+                .call(drag(simulation));
+
+            // Node click: re-search
+            node.on("click", (event, d) => {
+                searchInput.value = d.name;
+                loadGraph(d.name);
+            });
+
+            // Node labels
+            const label = g
+                .append("g")
+                .selectAll("text")
+                .data(nodes)
+                .join("text")
+                .attr("class", "node-label")
+                .attr("dx", (d) => nodeRadius(d) + 6)
+                .attr("dy", 4)
+                .text((d) => presentationMode ? anonLabel(d) : d.name);
+
+            // Tooltip on hover
+            node.append("title").text((d) => {
+                if (presentationMode) return d.type;
+                const count = connectionCount[d.name] || 0;
+                return d.name + " (" + d.type + ", " + count + " connections)";
+            });
+
+            // Apply presentation mode to edge labels
+            if (presentationMode) {
+                linkLabel.style("opacity", "0");
+            }
+
+            updateLegend(nodes);
+
+            simulation.on("tick", () => {
+                link.attr("x1", (d) => d.source.x)
+                    .attr("y1", (d) => d.source.y)
+                    .attr("x2", (d) => d.target.x)
+                    .attr("y2", (d) => d.target.y);
+
+                linkLabel
+                    .attr("x", (d) => (d.source.x + d.target.x) / 2)
+                    .attr("y", (d) => (d.source.y + d.target.y) / 2);
+
+                node.attr("cx", (d) => d.x).attr("cy", (d) => d.y);
+
+                label.attr("x", (d) => d.x).attr("y", (d) => d.y);
+            });
+        }
+
+        function drag(simulation) {
+            return d3
+                .drag()
+                .on("start", (event, d) => {
+                    if (!event.active) simulation.alphaTarget(0.3).restart();
+                    d.fx = d.x;
+                    d.fy = d.y;
+                })
+                .on("drag", (event, d) => {
+                    d.fx = event.x;
+                    d.fy = event.y;
+                })
+                .on("end", (event, d) => {
+                    if (!event.active) simulation.alphaTarget(0);
+                    d.fx = null;
+                    d.fy = null;
+                });
+        }
+    })();
+</script>
+{{ end }}

@@ -1,0 +1,317 @@
+package memory
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type Embedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
+type Extractor interface {
+	Extract(ctx context.Context, content string, knownTypes []string) (*ExtractionResult, error)
+	ExtractCrossRelations(ctx context.Context, contentA, contentB string, knownTypes []string) ([]ExtractedRelation, error)
+}
+
+// Store is the single storage interface — handles both relational data and vector search.
+type Store interface {
+	SaveMemory(ctx context.Context, m *Memory, embedding []float32) error
+	GetMemory(ctx context.Context, id uuid.UUID) (*Memory, error)
+	ListMemories(ctx context.Context, filter Filter) ([]*Memory, error)
+	DeleteMemory(ctx context.Context, id uuid.UUID) error
+	SearchSimilar(ctx context.Context, embedding []float32, topK int, minScore float32) ([]ScoredMemory, error)
+	UpsertEntity(ctx context.Context, name, entityType string) (uuid.UUID, error)
+	UpsertRelation(ctx context.Context, fromID, toID uuid.UUID, relationship string, memoryID uuid.UUID, confidence float64) error
+	LinkMemoryEntity(ctx context.Context, memoryID, entityID uuid.UUID) error
+	GetGraph(ctx context.Context, entityName string, depth int) (*Graph, error)
+	GetFullGraph(ctx context.Context) (*Graph, error)
+	UpdateSummary(ctx context.Context, id uuid.UUID, summary string) error
+	GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*Memory, error)
+	GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]RelatedMemory, error)
+	GetEntityTypes(ctx context.Context) ([]string, error)
+}
+
+type Service struct {
+	store   Store
+	embed   Embedder
+	extract Extractor
+}
+
+func NewService(store Store, embed Embedder, extract Extractor) *Service {
+	return &Service{store: store, embed: embed, extract: extract}
+}
+
+const duplicateThreshold = 0.95
+
+// StoreMemory embeds + saves, then asynchronously extracts relations.
+// If a near-identical memory already exists (cosine similarity > 0.95), it updates
+// the existing memory in-place with the new content instead of creating a duplicate.
+func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID string, tags []string) (*StoreResult, error) {
+	vec, err := s.embed.Embed(ctx, content)
+	if err != nil {
+		return nil, fmt.Errorf("embed: %w", err)
+	}
+
+	now := time.Now()
+
+	// Check for duplicates — if found, update in-place.
+	existing, err := s.store.SearchSimilar(ctx, vec, 1, 0)
+	if err != nil {
+		slog.Warn("duplicate check failed, proceeding with insert", "err", err)
+	} else if len(existing) > 0 && existing[0].Score > duplicateThreshold {
+		m := existing[0].Memory
+		m.Content = content
+		if source != "" {
+			m.Source = source
+		}
+		if sessionID != "" {
+			m.SessionID = sessionID
+		}
+		if len(tags) > 0 {
+			m.Tags = tags
+		}
+		m.UpdatedAt = now
+
+		if err := s.store.SaveMemory(ctx, m, vec); err != nil {
+			return nil, fmt.Errorf("update existing memory: %w", err)
+		}
+
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			if err := s.extractAndGraph(bgCtx, m); err != nil {
+				slog.Warn("relation extraction failed", "memory_id", m.ID, "err", err)
+			}
+			s.crossConnect(bgCtx, m, vec)
+		}()
+
+		return &StoreResult{
+			Memory:    m,
+			Duplicate: true,
+			Score:     existing[0].Score,
+		}, nil
+	}
+
+	m := &Memory{
+		ID:        uuid.New(),
+		Content:   content,
+		Source:    source,
+		SessionID: sessionID,
+		Tags:      tags,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := s.store.SaveMemory(ctx, m, vec); err != nil {
+		return nil, fmt.Errorf("save memory: %w", err)
+	}
+
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := s.extractAndGraph(bgCtx, m); err != nil {
+			slog.Warn("relation extraction failed", "memory_id", m.ID, "err", err)
+		}
+		s.crossConnect(bgCtx, m, vec)
+	}()
+
+	return &StoreResult{Memory: m}, nil
+}
+
+func (s *Service) extractAndGraph(ctx context.Context, m *Memory) error {
+	knownTypes, err := s.store.GetEntityTypes(ctx)
+	if err != nil {
+		slog.Warn("failed to fetch entity types, using empty list", "err", err)
+	}
+	result, err := s.extract.Extract(ctx, m.Content, knownTypes)
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+
+	if result.Summary != "" {
+		if err := s.store.UpdateSummary(ctx, m.ID, result.Summary); err != nil {
+			slog.Warn("failed to save summary", "memory_id", m.ID, "err", err)
+		}
+	}
+
+	for _, r := range result.Relations {
+		if !validEntityType(r.FromType) || !validEntityType(r.ToType) {
+			slog.Warn("skipping relation with invalid entity type", "from", r.FromEntity, "from_type", r.FromType, "to", r.ToEntity, "to_type", r.ToType)
+			continue
+		}
+		fromID, err := s.store.UpsertEntity(ctx, r.FromEntity, r.FromType)
+		if err != nil {
+			slog.Warn("upsert entity failed", "entity", r.FromEntity, "err", err)
+			continue
+		}
+		toID, err := s.store.UpsertEntity(ctx, r.ToEntity, r.ToType)
+		if err != nil {
+			slog.Warn("upsert entity failed", "entity", r.ToEntity, "err", err)
+			continue
+		}
+		if err := s.store.UpsertRelation(ctx, fromID, toID, r.Relationship, m.ID, r.Confidence); err != nil {
+			slog.Warn("upsert relation failed", "from", r.FromEntity, "to", r.ToEntity, "err", err)
+		}
+		if err := s.store.LinkMemoryEntity(ctx, m.ID, fromID); err != nil {
+			slog.Warn("link memory entity failed", "memory_id", m.ID, "entity_id", fromID, "err", err)
+		}
+		if err := s.store.LinkMemoryEntity(ctx, m.ID, toID); err != nil {
+			slog.Warn("link memory entity failed", "memory_id", m.ID, "entity_id", toID, "err", err)
+		}
+	}
+	slog.Info("extracted relations", "memory_id", m.ID, "count", len(result.Relations))
+	return nil
+}
+
+// crossConnect finds semantically similar memories and extracts cross-memory relationships.
+func (s *Service) crossConnect(ctx context.Context, m *Memory, vec []float32) {
+	neighbors, err := s.store.SearchSimilar(ctx, vec, 6, 0.5)
+	if err != nil {
+		slog.Warn("cross-connect search failed", "memory_id", m.ID, "err", err)
+		return
+	}
+
+	var connected int
+	for _, n := range neighbors {
+		if n.Memory.ID == m.ID {
+			continue
+		}
+
+		knownTypes, err := s.store.GetEntityTypes(ctx)
+		if err != nil {
+			slog.Warn("failed to fetch entity types for cross-connect", "err", err)
+		}
+		relations, err := s.extract.ExtractCrossRelations(ctx, m.Content, n.Memory.Content, knownTypes)
+		if err != nil {
+			slog.Warn("cross-relation extraction failed", "memory_id", m.ID, "neighbor_id", n.Memory.ID, "err", err)
+			continue
+		}
+
+		for _, r := range relations {
+			if !validEntityType(r.FromType) || !validEntityType(r.ToType) {
+				slog.Warn("skipping cross-relation with invalid entity type", "from", r.FromEntity, "from_type", r.FromType, "to", r.ToEntity, "to_type", r.ToType)
+				continue
+			}
+			fromID, err := s.store.UpsertEntity(ctx, r.FromEntity, r.FromType)
+			if err != nil {
+				slog.Warn("upsert entity failed", "entity", r.FromEntity, "err", err)
+				continue
+			}
+			toID, err := s.store.UpsertEntity(ctx, r.ToEntity, r.ToType)
+			if err != nil {
+				slog.Warn("upsert entity failed", "entity", r.ToEntity, "err", err)
+				continue
+			}
+			if err := s.store.UpsertRelation(ctx, fromID, toID, r.Relationship, m.ID, r.Confidence); err != nil {
+				slog.Warn("upsert relation failed", "from", r.FromEntity, "to", r.ToEntity, "err", err)
+			}
+			// Link both memories to the entities
+			if err := s.store.LinkMemoryEntity(ctx, m.ID, fromID); err != nil {
+				slog.Warn("link memory entity failed", "memory_id", m.ID, "entity_id", fromID, "err", err)
+			}
+			if err := s.store.LinkMemoryEntity(ctx, m.ID, toID); err != nil {
+				slog.Warn("link memory entity failed", "memory_id", m.ID, "entity_id", toID, "err", err)
+			}
+			if err := s.store.LinkMemoryEntity(ctx, n.Memory.ID, fromID); err != nil {
+				slog.Warn("link memory entity failed", "memory_id", n.Memory.ID, "entity_id", fromID, "err", err)
+			}
+			if err := s.store.LinkMemoryEntity(ctx, n.Memory.ID, toID); err != nil {
+				slog.Warn("link memory entity failed", "memory_id", n.Memory.ID, "entity_id", toID, "err", err)
+			}
+			connected++
+		}
+	}
+
+	if connected > 0 {
+		slog.Info("cross-connected memory", "memory_id", m.ID, "new_relations", connected)
+	}
+}
+
+// RecallMemory does semantic search entirely within Postgres via pgvector.
+func (s *Service) RecallMemory(ctx context.Context, query string, topK int, minScore float32) ([]ScoredMemory, error) {
+	vec, err := s.embed.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+	return s.store.SearchSimilar(ctx, vec, topK, minScore)
+}
+
+// GetContext returns a formatted context block ready for AI system prompts.
+func (s *Service) GetContext(ctx context.Context, query string, topK int, minScore float32) (string, error) {
+	memories, err := s.RecallMemory(ctx, query, topK, minScore)
+	if err != nil {
+		return "", err
+	}
+	if len(memories) == 0 {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Relevant context from your personal knowledge base\n\n")
+	for i, sm := range memories {
+		sb.WriteString(fmt.Sprintf("### [%d] (score: %.2f, source: %s)\n%s\n\n",
+			i+1, sm.Score, sm.Memory.Source, sm.Memory.Content))
+	}
+	return sb.String(), nil
+}
+
+func (s *Service) ListMemories(ctx context.Context, filter Filter) ([]*Memory, error) {
+	if filter.Limit == 0 {
+		filter.Limit = 50
+	}
+	return s.store.ListMemories(ctx, filter)
+}
+
+func (s *Service) DeleteMemory(ctx context.Context, id uuid.UUID) error {
+	return s.store.DeleteMemory(ctx, id)
+}
+
+func (s *Service) GetMemory(ctx context.Context, id uuid.UUID) (*Memory, error) {
+	return s.store.GetMemory(ctx, id)
+}
+
+func (s *Service) GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*Memory, error) {
+	return s.store.GetMemoriesByEntity(ctx, entityID)
+}
+
+func (s *Service) GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]RelatedMemory, error) {
+	return s.store.GetRelatedMemories(ctx, memoryID)
+}
+
+// validEntityType checks structural sanity only — the LLM owns the taxonomy.
+// Rejects empty, "other", overly long strings, or types containing spaces/special chars.
+func validEntityType(t string) bool {
+	t = strings.ToLower(strings.TrimSpace(t))
+	if t == "" || t == "other" {
+		return false
+	}
+	if len(t) > 50 {
+		return false
+	}
+	for _, c := range t {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) GetGraph(ctx context.Context, entity string, depth int) (*Graph, error) {
+	if depth == 0 {
+		depth = 2
+	}
+	return s.store.GetGraph(ctx, entity, depth)
+}
+
+func (s *Service) GetFullGraph(ctx context.Context) (*Graph, error) {
+	return s.store.GetFullGraph(ctx)
+}

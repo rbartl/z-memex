@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16 # official pgvector image — has the extension built in
+    environment:
+      POSTGRES_USER: memex
+      POSTGRES_PASSWORD: memex
+      POSTGRES_DB: memex
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5433:5432" # expose locally for psql / debugging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memex"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

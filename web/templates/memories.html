@@ -1,0 +1,33 @@
+{{ define "memories.html" }}
+{{ template "layout" . }}
+{{ end }}
+
+{{ define "content" }}
+<h1>Memories</h1>
+
+<input
+    class="search-bar"
+    type="search"
+    name="q"
+    placeholder="Search memories semantically..."
+    hx-get="/ui/search"
+    hx-trigger="input changed delay:300ms, search"
+    hx-target="#memory-list"
+    hx-indicator="#search-spinner"
+>
+<span id="search-spinner" class="htmx-indicator">Searching...</span>
+
+<table>
+    <thead>
+        <tr>
+            <th>Content</th>
+            <th>Source</th>
+            <th>Tags</th>
+            <th>Created</th>
+        </tr>
+    </thead>
+    <tbody id="memory-list">
+        {{ template "memory_rows.html" . }}
+    </tbody>
+</table>
+{{ end }}

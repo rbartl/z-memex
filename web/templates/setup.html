@@ -1,0 +1,199 @@
+{{ define "setup.html" }} {{ template "layout" . }} {{ end }} {{ define
+"content" }}
+<h1>Setup Guide</h1>
+<p style="color: var(--text-dim); margin-bottom: 2rem">
+    Connect your AI tools to this memex instance. Replace
+    <code>YOUR_TOKEN</code> with your <code>MCP_AUTH_TOKEN</code>.
+</p>
+
+<div id="setup-cards"></div>
+
+<style>
+    .code-block {
+        position: relative;
+        background: #0d0f14;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1rem;
+        margin-top: 0.5rem;
+        overflow-x: auto;
+    }
+    .code-block pre {
+        margin: 0;
+        font-size: 0.8rem;
+        line-height: 1.5;
+        color: #c9d1d9;
+    }
+    .code-block code {
+        font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
+        white-space: pre;
+    }
+    .copy-btn {
+        position: absolute;
+        top: 0.5rem;
+        right: 0.5rem;
+        background: var(--tag-bg);
+        color: var(--tag-text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.75rem;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    .copy-btn:hover {
+        background: var(--bg-hover);
+    }
+</style>
+
+<script>
+    (function () {
+        const origin = window.location.origin;
+
+        const sections = [
+            {
+                title: "Claude Code (CLI)",
+                description: "Run this command in your terminal",
+                code: `claude mcp add --transport http memex ${origin}/mcp \\\n  --header "Authorization: Bearer YOUR_TOKEN"`,
+                copyText: `claude mcp add --transport http memex ${origin}/mcp --header "Authorization: Bearer YOUR_TOKEN"`,
+            },
+            {
+                title: "Claude Code (JSON)",
+                description: "Or use add-json for more control",
+                code: `claude mcp add-json memex '${JSON.stringify({ type: "http", url: `${origin}/mcp`, headers: { Authorization: "Bearer YOUR_TOKEN" } })}'`,
+                copyText: `claude mcp add-json memex '${JSON.stringify({ type: "http", url: `${origin}/mcp`, headers: { Authorization: "Bearer YOUR_TOKEN" } })}'`,
+            },
+            {
+                title: "Claude Desktop",
+                description: `Add to claude_desktop_config.json\nmacOS: ~/Library/Application Support/Claude/claude_desktop_config.json\nWindows: %APPDATA%\\Claude\\claude_desktop_config.json`,
+                code: JSON.stringify(
+                    {
+                        mcpServers: {
+                            memex: {
+                                type: "http",
+                                url: `${origin}/mcp`,
+                                headers: { Authorization: "Bearer YOUR_TOKEN" },
+                            },
+                        },
+                    },
+                    null,
+                    2,
+                ),
+                copyText: JSON.stringify(
+                    {
+                        mcpServers: {
+                            memex: {
+                                type: "http",
+                                url: `${origin}/mcp`,
+                                headers: { Authorization: "Bearer YOUR_TOKEN" },
+                            },
+                        },
+                    },
+                    null,
+                    2,
+                ),
+            },
+            {
+                title: "Gemini CLI",
+                description: "Add to ~/.gemini/settings.json",
+                code: JSON.stringify(
+                    {
+                        mcpServers: {
+                            memex: {
+                                httpUrl: `${origin}/mcp`,
+                                headers: { Authorization: "Bearer YOUR_TOKEN" },
+                            },
+                        },
+                    },
+                    null,
+                    2,
+                ),
+                copyText: JSON.stringify(
+                    {
+                        mcpServers: {
+                            memex: {
+                                httpUrl: `${origin}/mcp`,
+                                headers: { Authorization: "Bearer YOUR_TOKEN" },
+                            },
+                        },
+                    },
+                    null,
+                    2,
+                ),
+            },
+            {
+                title: ".mcp.json (Project-scoped)",
+                description:
+                    "Add to your project root to share with your team. Uses ${MCP_AUTH_TOKEN} env var so tokens stay out of version control.",
+                code: JSON.stringify(
+                    {
+                        mcpServers: {
+                            memex: {
+                                type: "http",
+                                url: `${origin}/mcp`,
+                                headers: {
+                                    Authorization: "Bearer ${MCP_AUTH_TOKEN}",
+                                },
+                            },
+                        },
+                    },
+                    null,
+                    2,
+                ),
+                copyText: JSON.stringify(
+                    {
+                        mcpServers: {
+                            memex: {
+                                type: "http",
+                                url: `${origin}/mcp`,
+                                headers: {
+                                    Authorization: "Bearer ${MCP_AUTH_TOKEN}",
+                                },
+                            },
+                        },
+                    },
+                    null,
+                    2,
+                ),
+            },
+        ];
+
+        const container = document.getElementById("setup-cards");
+
+        sections.forEach((section) => {
+            const card = document.createElement("div");
+            card.className = "card";
+
+            const descLines = section.description.split("\n");
+            const descHtml = descLines
+                .map((line, i) =>
+                    i === 0
+                        ? `<p class="label">${line}</p>`
+                        : `<p style="font-size:0.8rem;color:var(--text-dim);margin:0.1rem 0;">${line}</p>`,
+                )
+                .join("");
+
+            card.innerHTML = `
+            <h2>${section.title}</h2>
+            ${descHtml}
+            <div class="code-block">
+                <pre><code></code></pre>
+                <button class="copy-btn">Copy</button>
+            </div>
+        `;
+
+            // Set code text via textContent to avoid HTML escaping issues
+            card.querySelector("code").textContent = section.code;
+
+            const btn = card.querySelector(".copy-btn");
+            btn.addEventListener("click", () => {
+                navigator.clipboard.writeText(section.copyText);
+                btn.textContent = "Copied!";
+                setTimeout(() => (btn.textContent = "Copy"), 2000);
+            });
+
+            container.appendChild(card);
+        });
+    })();
+</script>
+{{ end }}

@@ -21,7 +21,7 @@ const ctxSource ctxKey = "source"
 
 // MemoryService is the interface the MCP server needs.
 type MemoryService interface {
-	StoreMemory(ctx context.Context, content, source, sessionID string, tags []string) (*memory.StoreResult, error)
+	StoreMemory(ctx context.Context, content, source, sessionID string, tags []string, importance int) (*memory.StoreResult, error)
 	RecallMemory(ctx context.Context, query string, topK int, minScore float32) ([]memory.ScoredMemory, error)
 	GetContext(ctx context.Context, query string, topK int, minScore float32) (string, error)
 	ListMemories(ctx context.Context, filter memory.Filter) ([]*memory.Memory, error)
@@ -201,6 +201,7 @@ When storing, write the content as a clear, self-contained statement that will b
 						"content":    map[string]any{"type": "string", "description": "A clear, self-contained statement of the knowledge to remember. Write it so it makes sense without conversation context."},
 						"session_id": map[string]any{"type": "string", "description": "Optional session identifier for grouping related memories"},
 						"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Categorization tags, e.g. [\"preference\", \"go\"] or [\"architecture\", \"database\"]"},
+						"importance": map[string]any{"type": "integer", "description": "How important this memory is, 1-5. 1=low/trivia, 3=normal (default), 5=critical/must-never-forget. Use 4-5 for core preferences, architectural decisions, and important conventions."},
 					},
 					"required": []string{"content"},
 				},
@@ -316,8 +317,9 @@ func (s *Server) toolStoreMemory(ctx context.Context, args map[string]any) (any,
 	source, _ := ctx.Value(ctxSource).(string)
 	sessionID := stringArg(args, "session_id")
 	tags := stringSliceArg(args, "tags")
+	importance := intArg(args, "importance", 0)
 
-	result, err := s.svc.StoreMemory(ctx, content, source, sessionID, tags)
+	result, err := s.svc.StoreMemory(ctx, content, source, sessionID, tags, importance)
 	if err != nil {
 		return nil, err
 	}

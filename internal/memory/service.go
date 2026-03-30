@@ -26,6 +26,8 @@ type Store interface {
 	ListMemories(ctx context.Context, filter Filter) ([]*Memory, error)
 	DeleteMemory(ctx context.Context, id uuid.UUID) error
 	SearchSimilar(ctx context.Context, embedding []float32, topK int, minScore float32) ([]ScoredMemory, error)
+	SearchHybrid(ctx context.Context, embedding []float32, topK int, minScore float32, cfg ScoringConfig) ([]ScoredMemory, error)
+	RecordAccess(ctx context.Context, ids []uuid.UUID) error
 	UpsertEntity(ctx context.Context, name, entityType string) (uuid.UUID, error)
 	UpsertRelation(ctx context.Context, fromID, toID uuid.UUID, relationship string, memoryID uuid.UUID, confidence float64) error
 	LinkMemoryEntity(ctx context.Context, memoryID, entityID uuid.UUID) error
@@ -52,7 +54,11 @@ const duplicateThreshold = 0.95
 // StoreMemory embeds + saves, then asynchronously extracts relations.
 // If a near-identical memory already exists (cosine similarity > 0.95), it updates
 // the existing memory in-place with the new content instead of creating a duplicate.
-func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID string, tags []string) (*StoreResult, error) {
+// importance should be 1-5 (3=normal). Pass 0 to use the default (3).
+func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID string, tags []string, importance int) (*StoreResult, error) {
+	if importance < 1 || importance > 5 {
+		importance = 3
+	}
 	vec, err := s.embed.Embed(ctx, content)
 	if err != nil {
 		return nil, fmt.Errorf("embed: %w", err)
@@ -76,6 +82,7 @@ func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID st
 		if len(tags) > 0 {
 			m.Tags = tags
 		}
+		m.Importance = importance
 		m.UpdatedAt = now
 
 		if err := s.store.SaveMemory(ctx, m, vec); err != nil {
@@ -99,13 +106,14 @@ func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID st
 	}
 
 	m := &Memory{
-		ID:        uuid.New(),
-		Content:   content,
-		Source:    source,
-		SessionID: sessionID,
-		Tags:      tags,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         uuid.New(),
+		Content:    content,
+		Source:     source,
+		SessionID:  sessionID,
+		Tags:       tags,
+		Importance: importance,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 
 	if err := s.store.SaveMemory(ctx, m, vec); err != nil {
@@ -236,13 +244,33 @@ func (s *Service) crossConnect(ctx context.Context, m *Memory, vec []float32) {
 	}
 }
 
-// RecallMemory does semantic search entirely within Postgres via pgvector.
+// RecallMemory does semantic search with hybrid scoring (cosine + importance + recency + access).
 func (s *Service) RecallMemory(ctx context.Context, query string, topK int, minScore float32) ([]ScoredMemory, error) {
 	vec, err := s.embed.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	return s.store.SearchSimilar(ctx, vec, topK, minScore)
+	results, err := s.store.SearchHybrid(ctx, vec, topK, minScore, DefaultScoringConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	// Record access asynchronously for returned memories.
+	if len(results) > 0 {
+		ids := make([]uuid.UUID, len(results))
+		for i, r := range results {
+			ids[i] = r.Memory.ID
+		}
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.store.RecordAccess(bgCtx, ids); err != nil {
+				slog.Warn("failed to record access", "err", err)
+			}
+		}()
+	}
+
+	return results, nil
 }
 
 // GetContext returns a formatted context block ready for AI system prompts.

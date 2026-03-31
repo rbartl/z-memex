@@ -190,7 +190,7 @@ func (p *Postgres) SearchHybrid(ctx context.Context, embedding []float32, topK i
 		           $5 * cosine_score
 		         + $6 * (importance - 1) / 4.0
 		         + $7 * exp(-$8 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0)
-		         + $9 * LEAST(1.0, ln(1 + access_count) / ln(21))
+		         + $9 * LEAST(1.0, ln(1.0 + access_count::double precision) / ln(21.0))
 		       ) AS hybrid_score
 		FROM candidates
 		ORDER BY hybrid_score DESC

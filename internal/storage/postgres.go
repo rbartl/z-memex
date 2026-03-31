@@ -187,10 +187,10 @@ func (p *Postgres) SearchHybrid(ctx context.Context, embedding []float32, topK i
 		SELECT id, content, content_hash, summary, source, session_id, tags,
 		       importance, access_count, last_accessed_at, created_at, updated_at,
 		       (
-		           $5 * cosine_score
-		         + $6 * (importance - 1) / 4.0
-		         + $7 * exp(-$8 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0)
-		         + $9 * LEAST(1.0, ln(1.0 + access_count::double precision) / ln(21.0))
+		           $5::double precision * cosine_score
+		         + $6::double precision * (importance - 1)::double precision / 4.0
+		         + $7::double precision * exp(-$8::double precision * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0)
+		         + $9::double precision * LEAST(1.0, ln(1.0 + access_count::double precision) / ln(21.0))
 		       ) AS hybrid_score
 		FROM candidates
 		ORDER BY hybrid_score DESC

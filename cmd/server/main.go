@@ -57,7 +57,7 @@ func main() {
 	default: // "ollama" or empty
 		extractModel := os.Getenv("OLLAMA_EXTRACT_MODEL")
 		if extractModel == "" {
-			extractModel = "qwen3.5:9b"
+			extractModel = "gemma4:26b"
 		}
 		extractor = extraction.NewOllama(ollamaURL, extractModel)
 		slog.Info("using ollama extractor", "model", extractModel)

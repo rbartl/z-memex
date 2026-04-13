@@ -164,39 +164,57 @@ func (p *Postgres) SearchSimilar(ctx context.Context, embedding []float32, topK 
 	return results, nil
 }
 
-// SearchHybrid performs ANN retrieval then re-ranks using a hybrid scoring formula
-// that combines cosine similarity, importance, recency decay, and access frequency.
-func (p *Postgres) SearchHybrid(ctx context.Context, embedding []float32, topK int, minScore float32, cfg memory.ScoringConfig) ([]memory.ScoredMemory, error) {
+// SearchHybrid retrieves candidates from both vector (pgvector) and full-text (tsvector)
+// indexes, then combines them using Reciprocal Rank Fusion (RRF) with additive metadata boosts.
+func (p *Postgres) SearchHybrid(ctx context.Context, query string, embedding []float32, topK int, cfg memory.ScoringConfig) ([]memory.ScoredMemory, error) {
 	vec := pgvector.NewVector(embedding)
-	candidateK := topK * 3
 
 	// Decay constant: ln(2) / half_life_days
 	decayLambda := math.Ln2 / cfg.RecencyHalfLifeDays
 
 	rows, err := p.pool.Query(ctx, `
-		WITH candidates AS (
-			SELECT id, content, content_hash, summary, source, session_id, tags,
-			       importance, access_count, last_accessed_at, created_at, updated_at,
-			       1 - (embedding <=> $1) AS cosine_score
+		WITH vector_candidates AS (
+			SELECT id,
+			       ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS vrank
 			FROM memories
 			WHERE embedding IS NOT NULL
-			  AND 1 - (embedding <=> $1) >= $3
 			ORDER BY embedding <=> $1
 			LIMIT $2
+		),
+		fts_query AS (
+			SELECT to_tsquery('english',
+				replace(plainto_tsquery('english', $4)::text, ' & ', ' | ')
+			) AS q
+		),
+		fulltext_candidates AS (
+			SELECT id,
+			       ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, fts_query.q) DESC) AS frank
+			FROM memories, fts_query
+			WHERE content_tsv @@ fts_query.q
+			LIMIT $2
+		),
+		combined AS (
+			SELECT COALESCE(v.id, f.id) AS id,
+			       COALESCE(v.vrank,  $2) AS vrank,
+			       COALESCE(f.frank,  $2) AS frank
+			FROM vector_candidates v
+			FULL OUTER JOIN fulltext_candidates f ON v.id = f.id
 		)
-		SELECT id, content, content_hash, summary, source, session_id, tags,
-		       importance, access_count, last_accessed_at, created_at, updated_at,
+		SELECT m.id, m.content, m.content_hash, m.summary, m.source, m.session_id,
+		       m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
 		       (
-		           $5::double precision * cosine_score
-		         + $6::double precision * (importance - 1)::double precision / 4.0
-		         + $7::double precision * exp(-$8::double precision * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0)
-		         + $9::double precision * LEAST(1.0, ln(1.0 + access_count::double precision) / ln(21.0))
-		       ) AS hybrid_score
-		FROM candidates
-		ORDER BY hybrid_score DESC
-		LIMIT $4
-	`, vec, candidateK, minScore, topK,
-		cfg.CosineWeight, cfg.ImportanceWeight, cfg.RecencyWeight, decayLambda, cfg.AccessWeight,
+		           1.0 / ($5::double precision + c.vrank::double precision)
+		         + 1.0 / ($5::double precision + c.frank::double precision)
+		         + $6::double precision * (m.importance - 1)::double precision / 4.0
+		         + $7::double precision * exp(-$8::double precision * EXTRACT(EPOCH FROM (NOW() - m.created_at)) / 86400.0)
+		         + $9::double precision * LEAST(1.0, ln(1.0 + m.access_count::double precision) / ln(21.0))
+		       ) AS score
+		FROM combined c
+		JOIN memories m ON m.id = c.id
+		ORDER BY score DESC
+		LIMIT $3
+	`, vec, cfg.CandidateK, topK, query,
+		cfg.RRFConstant, cfg.ImportanceWeight, cfg.RecencyWeight, decayLambda, cfg.AccessWeight,
 	)
 	if err != nil {
 		return nil, err
@@ -357,6 +375,71 @@ func (p *Postgres) GetFullGraph(ctx context.Context) (*memory.Graph, error) {
 	}
 
 	return g, nil
+}
+
+func (p *Postgres) GetGraphForMemories(ctx context.Context, memoryIDs []uuid.UUID) (*memory.Graph, error) {
+	if len(memoryIDs) == 0 {
+		return nil, nil
+	}
+
+	g := &memory.Graph{}
+
+	// Get entities linked to these memories.
+	eRows, err := p.pool.Query(ctx, `
+		SELECT DISTINCT e.id, e.name, e.entity_type
+		FROM memory_entities me
+		JOIN entities e ON e.id = me.entity_id
+		WHERE me.memory_id = ANY($1)
+	`, memoryIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get entities for memories: %w", err)
+	}
+	defer eRows.Close()
+
+	entityIDs := map[uuid.UUID]bool{}
+	for eRows.Next() {
+		var e memory.Entity
+		if err := eRows.Scan(&e.ID, &e.Name, &e.Type); err != nil {
+			return nil, err
+		}
+		g.Nodes = append(g.Nodes, e)
+		entityIDs[e.ID] = true
+	}
+
+	if len(g.Nodes) == 0 {
+		return nil, nil
+	}
+
+	// Get relations between those entities.
+	rRows, err := p.pool.Query(ctx, `
+		SELECT r.id, e1.name, e2.name, r.relationship, r.confidence
+		FROM relations r
+		JOIN entities e1 ON e1.id = r.from_entity
+		JOIN entities e2 ON e2.id = r.to_entity
+		WHERE r.from_entity = ANY($1) AND r.to_entity = ANY($1)
+	`, uuidKeys(entityIDs))
+	if err != nil {
+		return nil, fmt.Errorf("get relations for memories: %w", err)
+	}
+	defer rRows.Close()
+
+	for rRows.Next() {
+		var r memory.Relation
+		if err := rRows.Scan(&r.ID, &r.From, &r.To, &r.Relationship, &r.Confidence); err != nil {
+			return nil, err
+		}
+		g.Edges = append(g.Edges, r)
+	}
+
+	return g, nil
+}
+
+func uuidKeys(m map[uuid.UUID]bool) []uuid.UUID {
+	keys := make([]uuid.UUID, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func (p *Postgres) GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*memory.Memory, error) {

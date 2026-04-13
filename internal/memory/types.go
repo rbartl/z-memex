@@ -69,6 +69,13 @@ type Graph struct {
 	Edges []Relation `json:"edges"`
 }
 
+// RecallResult is returned by RecallMemoryWithGraph, combining semantic search
+// results with the subgraph of entities and relations connected to those memories.
+type RecallResult struct {
+	Memories []ScoredMemory `json:"memories"`
+	Graph    *Graph         `json:"graph,omitempty"`
+}
+
 // Extraction types (returned by Anthropic)
 
 type ExtractionResult struct {
@@ -86,18 +93,22 @@ type ExtractedRelation struct {
 }
 
 // ScoringConfig controls the hybrid relevance scoring weights.
+// Retrieval uses Reciprocal Rank Fusion (RRF) over vector + full-text candidates,
+// then adds metadata boosts for importance, recency, and access frequency.
 type ScoringConfig struct {
-	CosineWeight        float64
-	ImportanceWeight    float64
-	RecencyWeight       float64
-	AccessWeight        float64
+	RRFConstant         int     // k constant in 1/(k+rank), typically 60
+	CandidateK          int     // how many candidates to fetch from each source
+	ImportanceWeight    float64 // additive boost for importance (0-1 normalized)
+	RecencyWeight       float64 // additive boost for recency decay
+	AccessWeight        float64 // additive boost for access frequency
 	RecencyHalfLifeDays float64
 }
 
 var DefaultScoringConfig = ScoringConfig{
-	CosineWeight:        0.60,
-	ImportanceWeight:    0.15,
-	RecencyWeight:       0.15,
-	AccessWeight:        0.10,
+	RRFConstant:         60,
+	CandidateK:          100,
+	ImportanceWeight:    0.005,
+	RecencyWeight:       0.005,
+	AccessWeight:        0.003,
 	RecencyHalfLifeDays: 90.0,
 }

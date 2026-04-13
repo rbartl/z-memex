@@ -19,7 +19,7 @@ import (
 type MemoryService interface {
 	ListMemories(ctx context.Context, filter memory.Filter) ([]*memory.Memory, error)
 	GetMemory(ctx context.Context, id uuid.UUID) (*memory.Memory, error)
-	RecallMemory(ctx context.Context, query string, topK int, minScore float32) ([]memory.ScoredMemory, error)
+	RecallMemory(ctx context.Context, query string, topK int) ([]memory.ScoredMemory, error)
 	DeleteMemory(ctx context.Context, id uuid.UUID) error
 	GetGraph(ctx context.Context, entity string, depth int) (*memory.Graph, error)
 	GetFullGraph(ctx context.Context) (*memory.Graph, error)
@@ -163,7 +163,7 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := h.svc.RecallMemory(r.Context(), query, 20, 0.1)
+	results, err := h.svc.RecallMemory(r.Context(), query, 20)
 	if err != nil {
 		http.Error(w, "search failed", http.StatusInternalServerError)
 		return

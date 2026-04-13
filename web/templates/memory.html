@@ -1,109 +1,79 @@
-{{ define "memory.html" }} {{ template "layout" . }} {{ end }} {{ define
-"content" }}
+{{ define "content" }}
 <a href="/ui" class="back-link">&larr; Back to memories</a>
 
 <div class="card" x-data="{ confirmDelete: false }">
-    <div class="meta-grid" style="margin-bottom: 1.5rem">
-        <div>
-            <div class="label">ID</div>
-            <div
-                class="value"
-                style="font-family: monospace; font-size: 0.8rem"
+    {{/* -- Header: inline badges + timestamps -- */}}
+    <div class="detail-header">
+        <div class="detail-badges">
+            <span class="tag importance-{{ .Memory.Importance }}"
+                >{{ importanceLabel .Memory.Importance }}</span
             >
-                {{ .Memory.ID }}
-            </div>
+            {{ if .Memory.Source }}<span class="source-badge"
+                >{{ .Memory.Source }}</span
+            >{{ end }} {{ range .Memory.Tags }}<span class="tag">{{ . }}</span
+            >{{ end }}
         </div>
-        <div>
-            <div class="label">Source</div>
-            <div class="value">
-                {{ if .Memory.Source }}<span class="source-badge"
-                    >{{ .Memory.Source }}</span
-                >{{ else }}-{{ end }}
-            </div>
-        </div>
-        <div>
-            <div class="label">Session</div>
-            <div class="value" style="font-size: 0.85rem">
-                {{ if .Memory.SessionID }}{{ .Memory.SessionID }}{{ else }}-{{
-                end }}
-            </div>
-        </div>
-        <div>
-            <div class="label">Created</div>
-            <div class="value">
-                {{ .Memory.CreatedAt.Format "2006-01-02 15:04:05" }}
-            </div>
-        </div>
-        <div>
-            <div class="label">Updated</div>
-            <div class="value">
-                {{ .Memory.UpdatedAt.Format "2006-01-02 15:04:05" }}
-            </div>
-        </div>
-        <div>
-            <div class="label">Importance</div>
-            <div class="value">
-                <span class="tag importance-{{ .Memory.Importance }}"
-                    >{{ importanceLabel .Memory.Importance }}</span
-                >
-            </div>
-        </div>
-        <div>
-            <div class="label">Access Count</div>
-            <div class="value">{{ .Memory.AccessCount }}</div>
-        </div>
-        <div>
-            <div class="label">Last Accessed</div>
-            <div class="value">
-                {{ if .Memory.LastAccessedAt }}{{ .Memory.LastAccessedAt.Format
-                "2006-01-02 15:04:05" }}{{ else }}-{{ end }}
-            </div>
-        </div>
-        <div>
-            <div class="label">Tags</div>
-            <div class="value">
-                {{ range .Memory.Tags }}<span class="tag">{{ . }}</span>{{ end
-                }}{{ if not .Memory.Tags }}-{{ end }}
-            </div>
+        <div class="detail-timestamps">
+            <span
+                >created {{ .Memory.CreatedAt.Format "2006-01-02 15:04" }}</span
+            >
+            <span>&middot;</span>
+            <span
+                >updated {{ .Memory.UpdatedAt.Format "2006-01-02 15:04" }}</span
+            >
+            {{ if .Memory.LastAccessedAt }}
+            <span>&middot;</span>
+            <span
+                >accessed {{ .Memory.LastAccessedAt.Format "2006-01-02 15:04" }}
+                ({{ .Memory.AccessCount }}&times;)</span
+            >
+            {{ end }}
         </div>
     </div>
 
-    {{ if .Memory.Summary }}
-    <div class="label">Summary</div>
-    <div class="value" style="color: var(--accent); margin-bottom: 1.5rem">
-        {{ .Memory.Summary }}
-    </div>
-    {{ end }}
+    {{/* -- Summary -- */}} {{ if .Memory.Summary }}
+    <div class="detail-summary">{{ .Memory.Summary }}</div>
+    {{ end }} {{/* -- Content -- */}}
+    <div class="detail-content">{{ .Memory.Content }}</div>
 
-    <div class="label">Content</div>
-    <div class="value">{{ .Memory.Content }}</div>
-
-    <div style="margin-top: 1.5rem; display: flex; gap: 0.5rem">
-        <template x-if="!confirmDelete">
-            <button class="btn btn-danger" @click="confirmDelete = true">
-                Delete
-            </button>
-        </template>
-        <template x-if="confirmDelete">
-            <div style="display: flex; gap: 0.5rem; align-items: center">
-                <span style="color: var(--danger); font-size: 0.85rem"
-                    >Are you sure?</span
-                >
+    {{/* -- Footer: ID, session, actions -- */}}
+    <div class="detail-footer">
+        <div class="detail-meta-line">
+            <span class="detail-meta-id">{{ .Memory.ID }}</span>
+            {{ if .Memory.SessionID }}<span class="detail-meta-sep"
+                >&middot;</span
+            ><span>session {{ .Memory.SessionID }}</span>{{ end }}
+        </div>
+        <div>
+            <template x-if="!confirmDelete">
                 <button
-                    class="btn btn-danger"
-                    hx-delete="/ui/memories/{{ .Memory.ID }}"
-                    hx-confirm=""
+                    class="btn btn-danger btn-sm"
+                    @click="confirmDelete = true"
                 >
-                    Yes, delete
+                    Delete
                 </button>
-                <button
-                    class="btn btn-secondary"
-                    @click="confirmDelete = false"
-                >
-                    Cancel
-                </button>
-            </div>
-        </template>
+            </template>
+            <template x-if="confirmDelete">
+                <div style="display: flex; gap: 0.5rem; align-items: center">
+                    <span style="color: var(--danger); font-size: 0.8rem"
+                        >Are you sure?</span
+                    >
+                    <button
+                        class="btn btn-danger btn-sm"
+                        hx-delete="/ui/memories/{{ .Memory.ID }}"
+                        hx-confirm=""
+                    >
+                        Yes, delete
+                    </button>
+                    <button
+                        class="btn btn-secondary btn-sm"
+                        @click="confirmDelete = false"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            </template>
+        </div>
     </div>
 </div>
 
@@ -121,12 +91,7 @@
             "
         >
             <span
-                style="
-                display:inline-block;
-                width:8px; height:8px; border-radius:50%;
-                background:{{ entityColor .Entity.Type }};
-                flex-shrink:0;
-            "
+                style="display:inline-block; width:8px; height:8px; border-radius:50%; background:{{ entityColor .Entity.Type }}; flex-shrink:0"
             ></span>
             <span style="font-weight: 600; font-size: 0.9rem"
                 >{{ .Entity.Name }}</span

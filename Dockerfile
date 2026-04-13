@@ -12,5 +12,9 @@ FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /app/memex .
+COPY --from=builder /app/migrations ./migrations
+COPY --from=builder /app/web/templates ./web/templates
+COPY --from=builder /app/web/partials ./web/partials
+COPY --from=builder /app/web/static ./web/static
 EXPOSE 3000
 CMD ["./memex"]

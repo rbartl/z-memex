@@ -16,5 +16,26 @@ services:
       retries: 10
     restart: unless-stopped
 
+  memex:
+    build: .
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      POSTGRES_URL: postgres://memex:memex@postgres:5432/memex?sslmode=disable
+      OLLAMA_URL: http://host.docker.internal:11434
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env or environment}
+      UI_USER: ${UI_USER:-admin}
+      UI_PASS: ${UI_PASS:-password}
+      EXTRACTOR: ${EXTRACTOR:-ollama}
+      OLLAMA_EXTRACT_MODEL: ${OLLAMA_EXTRACT_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  ollama_data:

@@ -32,11 +32,12 @@ type Store interface {
 	ListMemories(ctx context.Context, filter Filter) ([]*Memory, error)
 	DeleteMemory(ctx context.Context, id uuid.UUID) error
 	SearchSimilar(ctx context.Context, embedding []float32, topK int, minScore float32) ([]ScoredMemory, error)
-	SearchHybrid(ctx context.Context, embedding []float32, topK int, minScore float32, cfg ScoringConfig) ([]ScoredMemory, error)
+	SearchHybrid(ctx context.Context, query string, embedding []float32, topK int, cfg ScoringConfig) ([]ScoredMemory, error)
 	RecordAccess(ctx context.Context, ids []uuid.UUID) error
 	UpsertEntity(ctx context.Context, name, entityType string) (uuid.UUID, error)
 	UpsertRelation(ctx context.Context, fromID, toID uuid.UUID, relationship string, memoryID uuid.UUID, confidence float64) error
 	LinkMemoryEntity(ctx context.Context, memoryID, entityID uuid.UUID) error
+	GetGraphForMemories(ctx context.Context, memoryIDs []uuid.UUID) (*Graph, error)
 	GetGraph(ctx context.Context, entityName string, depth int) (*Graph, error)
 	GetFullGraph(ctx context.Context) (*Graph, error)
 	UpdateSummary(ctx context.Context, id uuid.UUID, summary string) error
@@ -312,13 +313,14 @@ func (s *Service) crossConnect(ctx context.Context, m *Memory, vec []float32) {
 	}
 }
 
-// RecallMemory does semantic search with hybrid scoring (cosine + importance + recency + access).
-func (s *Service) RecallMemory(ctx context.Context, query string, topK int, minScore float32) ([]ScoredMemory, error) {
+// RecallMemory does hybrid search using RRF over vector + full-text candidates,
+// boosted by importance, recency, and access frequency.
+func (s *Service) RecallMemory(ctx context.Context, query string, topK int) ([]ScoredMemory, error) {
 	vec, err := s.embed.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	results, err := s.store.SearchHybrid(ctx, vec, topK, minScore, DefaultScoringConfig)
+	results, err := s.store.SearchHybrid(ctx, query, vec, topK, DefaultScoringConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -341,9 +343,35 @@ func (s *Service) RecallMemory(ctx context.Context, query string, topK int, minS
 	return results, nil
 }
 
+// RecallMemoryWithGraph performs semantic recall and enriches results with
+// the subgraph of entities and relations connected to the returned memories.
+func (s *Service) RecallMemoryWithGraph(ctx context.Context, query string, topK int) (*RecallResult, error) {
+	memories, err := s.RecallMemory(ctx, query, topK)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &RecallResult{Memories: memories}
+
+	if len(memories) > 0 {
+		ids := make([]uuid.UUID, len(memories))
+		for i, m := range memories {
+			ids[i] = m.Memory.ID
+		}
+		graph, err := s.store.GetGraphForMemories(ctx, ids)
+		if err != nil {
+			slog.Warn("failed to fetch graph for recall results", "err", err)
+		} else {
+			result.Graph = graph
+		}
+	}
+
+	return result, nil
+}
+
 // GetContext returns a formatted context block ready for AI system prompts.
-func (s *Service) GetContext(ctx context.Context, query string, topK int, minScore float32) (string, error) {
-	memories, err := s.RecallMemory(ctx, query, topK, minScore)
+func (s *Service) GetContext(ctx context.Context, query string, topK int) (string, error) {
+	memories, err := s.RecallMemory(ctx, query, topK)
 	if err != nil {
 		return "", err
 	}

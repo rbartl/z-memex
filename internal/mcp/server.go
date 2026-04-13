@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -22,11 +21,9 @@ const ctxSource ctxKey = "source"
 // MemoryService is the interface the MCP server needs.
 type MemoryService interface {
 	StoreMemory(ctx context.Context, content, source, sessionID string, tags []string, importance int) (*memory.StoreResult, error)
-	RecallMemory(ctx context.Context, query string, topK int, minScore float32) ([]memory.ScoredMemory, error)
-	GetContext(ctx context.Context, query string, topK int, minScore float32) (string, error)
+	RecallMemoryWithGraph(ctx context.Context, query string, topK int) (*memory.RecallResult, error)
 	ListMemories(ctx context.Context, filter memory.Filter) ([]*memory.Memory, error)
 	DeleteMemory(ctx context.Context, id uuid.UUID) error
-	GetGraph(ctx context.Context, entity string, depth int) (*memory.Graph, error)
 }
 
 type Server struct {
@@ -176,7 +173,7 @@ func (s *Server) handleToolsList() (any, error) {
 		"tools": []map[string]any{
 			{
 				"name": "store_memory",
-				"description": `Store a piece of knowledge in the shared memory system. Automatically embeds the content and builds knowledge graph connections.
+				"description": `Store a piece of knowledge in the shared memory system. Automatically embeds the content, deduplicates, and builds knowledge graph connections.
 
 YOU SHOULD PROACTIVELY CALL THIS TOOL when any of the following occur during a conversation:
 - The user states a **preference or convention** (e.g. "I prefer tabs over spaces", "always use Go for new services")
@@ -208,67 +205,45 @@ When storing, write the content as a clear, self-contained statement that will b
 			},
 			{
 				"name": "recall_memory",
-				"description": `Semantically search the shared knowledge base. Returns the most relevant memories ranked by similarity.
+				"description": `Semantically search the shared knowledge base. Returns the most relevant memories ranked by similarity, along with a knowledge graph showing how entities in those memories are connected.
 
 YOU SHOULD PROACTIVELY CALL THIS TOOL:
 - At the **start of a conversation** to check for relevant context about the user, project, or topic
 - Before storing a new memory, to **avoid duplicates**
 - When the user asks about something that may have been discussed in a **previous session**
-- When you need to recall **user preferences, decisions, or project details**`,
+- When you need to recall **user preferences, decisions, or project details**
+
+The response includes:
+- **memories**: ranked results with content and similarity scores
+- **graph**: entities and relationships extracted from those memories (e.g. "Go" --uses--> "chi router")`,
 				"inputSchema": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"query":     map[string]any{"type": "string", "description": "Natural language search query — describe what you're looking for conversationally"},
-						"top_k":     map[string]any{"type": "integer", "description": "Number of results to return (default 5)"},
-						"min_score": map[string]any{"type": "number", "description": "Minimum similarity score 0.0-1.0 to include (default 0.3). Increase to get only highly relevant results."},
+						"query": map[string]any{"type": "string", "description": "Natural language search query — describe what you're looking for conversationally"},
+						"top_k": map[string]any{"type": "integer", "description": "Number of results to return (default 5)"},
 					},
 					"required": []string{"query"},
 				},
 			},
 			{
-				"name":        "get_context",
-				"description": "Get a formatted context block from your knowledge base, ready to inject into a system prompt.",
+				"name":        "manage_memories",
+				"description": "List and browse stored memories for housekeeping. Use this to review what's stored, find duplicates, or clean up. For semantic search, use recall_memory instead.",
 				"inputSchema": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"query":     map[string]any{"type": "string", "description": "What context to retrieve"},
-						"top_k":     map[string]any{"type": "integer", "description": "Number of memories to include (default 5)"},
-						"min_score": map[string]any{"type": "number", "description": "Minimum similarity score 0.0-1.0 to include (default 0.3)"},
-					},
-					"required": []string{"query"},
-				},
-			},
-			{
-				"name":        "list_memories",
-				"description": "List recent memories, optionally filtered by source or tags.",
-				"inputSchema": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"source": map[string]any{"type": "string", "description": "Filter by source tool"},
-						"tags":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						"source": map[string]any{"type": "string", "description": "Filter by source (e.g. \"claude-code\", \"cursor\")"},
+						"tags":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Filter by tags"},
 						"limit":  map[string]any{"type": "integer", "description": "Max results (default 20)"},
 					},
 				},
 			},
 			{
 				"name":        "delete_memory",
-				"description": "Delete a memory by ID.",
+				"description": "Delete a memory by its ID. Use manage_memories or recall_memory first to find the ID.",
 				"inputSchema": map[string]any{
 					"type":       "object",
-					"properties": map[string]any{"id": map[string]any{"type": "string"}},
+					"properties": map[string]any{"id": map[string]any{"type": "string", "description": "UUID of the memory to delete"}},
 					"required":   []string{"id"},
-				},
-			},
-			{
-				"name":        "get_graph",
-				"description": "Explore the knowledge graph around an entity. Returns connected concepts and relationships.",
-				"inputSchema": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"entity": map[string]any{"type": "string", "description": "Entity name to center the graph on"},
-						"depth":  map[string]any{"type": "integer", "description": "Graph traversal depth (default 2)"},
-					},
-					"required": []string{"entity"},
 				},
 			},
 		},
@@ -294,14 +269,10 @@ func (s *Server) handleToolCall(ctx context.Context, raw json.RawMessage) (any, 
 		return s.toolStoreMemory(ctx, args)
 	case "recall_memory":
 		return s.toolRecallMemory(ctx, args)
-	case "get_context":
-		return s.toolGetContext(ctx, args)
-	case "list_memories":
-		return s.toolListMemories(ctx, args)
+	case "manage_memories":
+		return s.toolManageMemories(ctx, args)
 	case "delete_memory":
 		return s.toolDeleteMemory(ctx, args)
-	case "get_graph":
-		return s.toolGetGraph(ctx, args)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", p.Name)
 	}
@@ -342,36 +313,16 @@ func (s *Server) toolRecallMemory(ctx context.Context, args map[string]any) (any
 	query := stringArg(args, "query")
 	topK := intArg(args, "top_k", 5)
 
-	minScore := floatArg(args, "min_score", 0.3)
-
-	results, err := s.svc.RecallMemory(ctx, query, topK, minScore)
+	result, err := s.svc.RecallMemoryWithGraph(ctx, query, topK)
 	if err != nil {
 		return nil, err
 	}
 
-	out, _ := json.MarshalIndent(results, "", "  ")
+	out, _ := json.MarshalIndent(result, "", "  ")
 	return toolResult(string(out)), nil
 }
 
-func (s *Server) toolGetContext(ctx context.Context, args map[string]any) (any, error) {
-	query := stringArg(args, "query")
-	topK := intArg(args, "top_k", 5)
-	minScore := floatArg(args, "min_score", 0.3)
-
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	block, err := s.svc.GetContext(ctx2, query, topK, minScore)
-	if err != nil {
-		return nil, err
-	}
-	if block == "" {
-		return toolResult("No relevant context found."), nil
-	}
-	return toolResult(block), nil
-}
-
-func (s *Server) toolListMemories(ctx context.Context, args map[string]any) (any, error) {
+func (s *Server) toolManageMemories(ctx context.Context, args map[string]any) (any, error) {
 	filter := memory.Filter{
 		Source: stringArg(args, "source"),
 		Tags:   stringSliceArg(args, "tags"),
@@ -395,18 +346,6 @@ func (s *Server) toolDeleteMemory(ctx context.Context, args map[string]any) (any
 		return nil, err
 	}
 	return toolResult("Memory deleted."), nil
-}
-
-func (s *Server) toolGetGraph(ctx context.Context, args map[string]any) (any, error) {
-	entity := stringArg(args, "entity")
-	depth := intArg(args, "depth", 2)
-
-	graph, err := s.svc.GetGraph(ctx, entity, depth)
-	if err != nil {
-		return nil, err
-	}
-	out, _ := json.MarshalIndent(graph, "", "  ")
-	return toolResult(string(out)), nil
 }
 
 // --- Helpers ---

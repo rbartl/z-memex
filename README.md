@@ -25,20 +25,18 @@ Three-tier dedup prevents redundant memories without losing information:
 | Near-identical | Cosine similarity ≥ 0.99 | Update in place |
 | Distinct | Below 0.85 | Insert as new memory |
 
-### Relevance Decay
+### Hybrid Scoring
 
-Recall uses a hybrid scoring formula instead of pure cosine similarity:
+Recall uses **Reciprocal Rank Fusion (RRF)** over two retrieval paths — pgvector cosine similarity and PostgreSQL full-text search — with small additive metadata boosts:
 
 ```
-final_score = 0.60 * cosine_similarity
-            + 0.15 * importance              (normalized 1-5)
-            + 0.15 * recency_decay           (exponential, 90-day half-life)
-            + 0.10 * access_frequency         (log-scaled, saturates ~20 accesses)
+score = 1/(k + vector_rank) + 1/(k + fulltext_rank)
+      + importance_weight * (importance - 1) / 4
+      + recency_weight   * exp(-λ * age_in_days)
+      + access_weight    * min(1, ln(1 + access_count) / ln(21))
 ```
 
-- **Importance** (1-5): set at store time. 1 = trivia, 3 = normal, 5 = critical.
-- **Recency**: newer memories score higher, decaying with a 90-day half-life.
-- **Access frequency**: memories recalled more often stay relevant.
+Default weights are intentionally small (`0.005`, `0.005`, `0.003`) so RRF dominates and metadata acts as a tiebreaker. The recency decay half-life is 90 days.
 
 ### Knowledge Graph
 
@@ -100,19 +98,16 @@ claude mcp add memex \
 | Tool | Description |
 |---|---|
 | `store_memory` | Store knowledge with optional importance (1-5). Auto-deduplicates and extracts entities + relationships in background. |
-| `recall_memory` | Semantic search with hybrid scoring (cosine + importance + recency + access frequency). |
-| `get_context` | Formatted context block ready for injection into system prompts. |
-| `list_memories` | List recent memories, filter by source/tags. |
+| `recall_memory` | Semantic search with hybrid RRF scoring. Returns ranked memories plus an aggregated knowledge graph of entities and relationships across the result set. |
+| `manage_memories` | List and browse stored memories for housekeeping. Filter by source or tags. |
 | `delete_memory` | Remove a memory by ID. |
-| `get_graph` | Explore the knowledge graph around any entity. |
 
 ## How It Works
 
 1. `store_memory` called → content hashed for exact-dedup check → Ollama embeds locally → cosine similarity checked for merge/update/insert
 2. Background goroutine → Anthropic Haiku extracts entities + relationships → graph grows in Postgres
 3. Cross-connection: semantically similar memories are compared to discover shared entities
-4. `recall_memory("backend preferences")` → pgvector ANN retrieval → re-ranked by hybrid scoring formula
-5. `get_graph("Go")` → recursive CTE traverses the knowledge graph across all tools/sessions
+4. `recall_memory("backend preferences")` → RRF over pgvector ANN + full-text search → metadata boosts applied → ranked results returned with aggregated knowledge graph
 
 ## Web UI
 

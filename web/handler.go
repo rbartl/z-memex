@@ -18,9 +18,11 @@ import (
 	"gitlab.com/zollneritsch/memex/internal/memory"
 )
 
-// ChatStreamer streams a chat completion token-by-token.
+// ChatStreamer streams a chat completion token-by-token and can synthesize
+// a context-aware search query from the conversation history.
 type ChatStreamer interface {
 	Stream(ctx context.Context, messages []chat.Message, onToken func(string) error) error
+	SynthesizeQuery(ctx context.Context, history []chat.Message, latestUserMsg string) (string, error)
 	Model() string
 }
 
@@ -317,12 +319,24 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve relevant memories for RAG context.
-	recalled, err := h.svc.RecallMemory(r.Context(), req.Message, 5)
+	// Ask the model to synthesize the best search query given the full
+	// conversation context, so follow-up questions resolve correctly.
+	searchQuery, err := h.chat.SynthesizeQuery(r.Context(), req.History, req.Message)
 	if err != nil {
-		slog.Error("chat recall failed", "err", err)
-		http.Error(w, "recall failed", http.StatusInternalServerError)
-		return
+		slog.Warn("query synthesis failed, falling back to raw message", "err", err)
+		searchQuery = req.Message
+	}
+
+	// Retrieve relevant memories (skip if the model decided no lookup is needed).
+	var recalled []memory.ScoredMemory
+	if searchQuery != "" {
+		slog.Info("chat recall", "query", searchQuery)
+		recalled, err = h.svc.RecallMemory(r.Context(), searchQuery, 5)
+		if err != nil {
+			slog.Error("chat recall failed", "err", err)
+			http.Error(w, "recall failed", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Set SSE headers before writing anything.

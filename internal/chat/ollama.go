@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Message is a single turn in a conversation.
@@ -104,4 +105,64 @@ func (c *Client) Stream(ctx context.Context, messages []Message, onToken func(st
 	}
 
 	return nil
+}
+
+const queryRewritePrompt = `You are a search query synthesizer for a personal knowledge base.
+
+Given the conversation below, output the single most useful search query to retrieve relevant memories that would help answer the user's latest message. Take into account the full conversation context to resolve pronouns and references (e.g. "her" → the person mentioned earlier).
+
+Reply with ONLY the raw search query string — no quotes, no explanation, no punctuation at the end.
+If the latest message is chit-chat, a greeting, or requires no knowledge lookup, reply with exactly: NONE`
+
+// SynthesizeQuery sends the conversation to the model and asks it to produce
+// the best knowledge-base search query given the full context. Returns an
+// empty string when the model decides no retrieval is needed.
+func (c *Client) SynthesizeQuery(ctx context.Context, history []Message, latestUserMsg string) (string, error) {
+	// Build a compact conversation transcript for the prompt.
+	var sb strings.Builder
+	for _, m := range history {
+		fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
+	}
+	fmt.Fprintf(&sb, "user: %s", latestUserMsg)
+
+	messages := []Message{
+		{Role: "system", Content: queryRewritePrompt},
+		{Role: "user", Content: sb.String()},
+	}
+
+	body, err := json.Marshal(ollamaChatRequest{
+		Model:    c.model,
+		Messages: messages,
+		Stream:   false,
+	})
+	if err != nil {
+		return "", fmt.Errorf("chat: synthesize query marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("chat: synthesize query request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("chat: synthesize query do: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("chat: synthesize query status %d", resp.StatusCode)
+	}
+
+	var result ollamaChatChunk
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("chat: synthesize query decode: %w", err)
+	}
+
+	query := strings.TrimSpace(result.Message.Content)
+	if strings.EqualFold(query, "none") {
+		return "", nil
+	}
+	return query, nil
 }

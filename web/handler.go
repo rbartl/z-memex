@@ -252,7 +252,9 @@ func (h *Handler) handleGraphData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(graph)
+	if err := json.NewEncoder(w).Encode(graph); err != nil {
+		http.Error(w, "encode failed", http.StatusInternalServerError)
+	}
 }
 
 // groupByEntity re-organises a flat RelatedMemory list into per-entity groups.

@@ -371,15 +371,6 @@ func intArg(args map[string]any, key string, def int) int {
 	return def
 }
 
-func floatArg(args map[string]any, key string, def float32) float32 {
-	switch v := args[key].(type) {
-	case float64:
-		return float32(v)
-	case float32:
-		return v
-	}
-	return def
-}
 
 func stringSliceArg(args map[string]any, key string) []string {
 	v, ok := args[key].([]any)

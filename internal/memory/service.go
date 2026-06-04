@@ -382,8 +382,8 @@ func (s *Service) GetContext(ctx context.Context, query string, topK int) (strin
 	var sb strings.Builder
 	sb.WriteString("## Relevant context from your personal knowledge base\n\n")
 	for i, sm := range memories {
-		sb.WriteString(fmt.Sprintf("### [%d] (score: %.2f, source: %s)\n%s\n\n",
-			i+1, sm.Score, sm.Memory.Source, sm.Memory.Content))
+		fmt.Fprintf(&sb, "### [%d] (score: %.2f, source: %s)\n%s\n\n",
+			i+1, sm.Score, sm.Memory.Source, sm.Memory.Content)
 	}
 	return sb.String(), nil
 }
@@ -422,7 +422,7 @@ func validEntityType(t string) bool {
 		return false
 	}
 	for _, c := range t {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' && c != '-' {
 			return false
 		}
 	}

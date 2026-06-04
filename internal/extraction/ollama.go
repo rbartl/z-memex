@@ -60,7 +60,7 @@ func (o *Ollama) generate(ctx context.Context, prompt string) (*ollamaGenerateRe
 	if err != nil {
 		return nil, fmt.Errorf("ollama generate request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("ollama generate status: %d", resp.StatusCode)

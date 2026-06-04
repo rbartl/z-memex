@@ -102,9 +102,11 @@ func runMigrations(pgURL string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
-	goose.SetDialect("postgres")
+	if err := goose.SetDialect("postgres"); err != nil {
+		return err
+	}
 	if err := goose.Up(db, "migrations"); err != nil {
 		return err
 	}

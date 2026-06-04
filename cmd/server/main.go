@@ -15,6 +15,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/pressly/goose/v3"
 
+	"gitlab.com/zollneritsch/memex/internal/chat"
 	"gitlab.com/zollneritsch/memex/internal/embeddings"
 	"gitlab.com/zollneritsch/memex/internal/extraction"
 	"gitlab.com/zollneritsch/memex/internal/mcp"
@@ -65,9 +66,16 @@ func main() {
 
 	svc := memory.NewService(pg, embedder, extractor)
 
+	chatModel := os.Getenv("OLLAMA_CHAT_MODEL")
+	if chatModel == "" {
+		chatModel = "llama3.2"
+	}
+	chatClient := chat.NewClient(ollamaURL, chatModel)
+	slog.Info("using ollama chat model", "model", chatModel)
+
 	authToken := mustEnv("MCP_AUTH_TOKEN")
 	mcpServer := mcp.NewServer(svc, authToken)
-	webHandler := web.NewHandler(svc, "web", mustEnv("UI_USER"), mustEnv("UI_PASS"))
+	webHandler := web.NewHandler(svc, chatClient, "web", mustEnv("UI_USER"), mustEnv("UI_PASS"))
 
 	r := chi.NewRouter()
 	r.Mount("/", mcpServer.Router())

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -13,8 +14,15 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"gitlab.com/zollneritsch/memex/internal/chat"
 	"gitlab.com/zollneritsch/memex/internal/memory"
 )
+
+// ChatStreamer streams a chat completion token-by-token.
+type ChatStreamer interface {
+	Stream(ctx context.Context, messages []chat.Message, onToken func(string) error) error
+	Model() string
+}
 
 type MemoryService interface {
 	ListMemories(ctx context.Context, filter memory.Filter) ([]*memory.Memory, error)
@@ -29,12 +37,13 @@ type MemoryService interface {
 
 type Handler struct {
 	svc       MemoryService
+	chat      ChatStreamer
 	templates map[string]*template.Template
 	username  string
 	password  string
 }
 
-func NewHandler(svc MemoryService, templateDir, username, password string) *Handler {
+func NewHandler(svc MemoryService, chatClient ChatStreamer, templateDir, username, password string) *Handler {
 	funcMap := template.FuncMap{
 		"truncate": func(s string, n int) string {
 			if len(s) <= n {
@@ -85,7 +94,7 @@ func NewHandler(svc MemoryService, templateDir, username, password string) *Hand
 
 	// Parse each page template independently with the layout + partials.
 	// This avoids "content" block name collisions between pages.
-	pages := []string{"memories.html", "memory.html", "graph.html", "setup.html"}
+	pages := []string{"memories.html", "memory.html", "graph.html", "setup.html", "chat.html"}
 	templates := make(map[string]*template.Template)
 	for _, page := range pages {
 		pageFile := filepath.Join(templateDir, "templates", page)
@@ -102,7 +111,7 @@ func NewHandler(svc MemoryService, templateDir, username, password string) *Hand
 	)
 	templates["memory_rows.html"] = partials
 
-	return &Handler{svc: svc, templates: templates, username: username, password: password}
+	return &Handler{svc: svc, chat: chatClient, templates: templates, username: username, password: password}
 }
 
 func (h *Handler) basicAuth(next http.Handler) http.Handler {
@@ -130,6 +139,8 @@ func (h *Handler) Router() http.Handler {
 	r.Get("/graph", h.handleGraph)
 	r.Get("/graph/data", h.handleGraphData)
 	r.Get("/setup", h.handleSetup)
+	r.Get("/chat", h.handleChat)
+	r.Post("/chat/stream", h.handleChatStream)
 
 	// Static files
 	r.Handle("/static/*", http.StripPrefix("/ui/static/", http.FileServer(http.Dir(filepath.Join("web", "static")))))
@@ -276,6 +287,98 @@ func groupByEntity(related []memory.RelatedMemory) []memory.EntityGroup {
 		groups = append(groups, *index[id])
 	}
 	return groups
+}
+
+func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
+	h.render(w, "chat.html", "layout", map[string]any{
+		"Title": "Chat",
+		"Model": h.chat.Model(),
+	})
+}
+
+// chatStreamRequest is the JSON body sent by the browser for each turn.
+type chatStreamRequest struct {
+	Message string         `json:"message"`
+	History []chat.Message `json:"history"`
+}
+
+// chatSource is a single retrieved memory serialised into the sources SSE event.
+type chatSource struct {
+	ID      string  `json:"id"`
+	Content string  `json:"content"`
+	Score   float32 `json:"score"`
+	Source  string  `json:"source"`
+}
+
+func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
+	var req chatStreamRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Retrieve relevant memories for RAG context.
+	recalled, err := h.svc.RecallMemory(r.Context(), req.Message, 5)
+	if err != nil {
+		slog.Error("chat recall failed", "err", err)
+		http.Error(w, "recall failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Set SSE headers before writing anything.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	sseEvent := func(event, data string) {
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data) //nolint:errcheck
+		flusher.Flush()
+	}
+
+	// Send the source memories as the first event so the UI can render citations.
+	sources := make([]chatSource, len(recalled))
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("You are a helpful assistant with access to the user's personal knowledge base. Answer based on the context below. If the context is insufficient, say so honestly.\n\n## Knowledge base context\n\n")
+	for i, sm := range recalled {
+		sources[i] = chatSource{
+			ID:      sm.Memory.ID.String(),
+			Content: sm.Memory.Content,
+			Score:   sm.Score,
+			Source:  sm.Memory.Source,
+		}
+		fmt.Fprintf(&contextBuilder, "### Memory %d (score: %.2f, source: %s)\n%s\n\n", i+1, sm.Score, sm.Memory.Source, sm.Memory.Content)
+	}
+
+	srcJSON, _ := json.Marshal(sources)
+	sseEvent("sources", string(srcJSON))
+
+	// Build the messages for Ollama: system prompt + history + new user message.
+	messages := []chat.Message{
+		{Role: "system", Content: contextBuilder.String()},
+	}
+	messages = append(messages, req.History...)
+	messages = append(messages, chat.Message{Role: "user", Content: req.Message})
+
+	// Stream the model response token by token.
+	if err := h.chat.Stream(r.Context(), messages, func(token string) error {
+		encoded, _ := json.Marshal(token)
+		_, err := fmt.Fprintf(w, "event: token\ndata: %s\n\n", encoded)
+		flusher.Flush()
+		return err
+	}); err != nil {
+		slog.Error("chat stream error", "err", err)
+		sseEvent("error", `"stream error"`)
+		return
+	}
+
+	sseEvent("done", "{}")
 }
 
 // render executes the named block from the page's template set.

@@ -1,0 +1,380 @@
+{{ define "content" }}
+<style>
+    .chat-layout {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 56px - 4rem);
+        min-height: 400px;
+    }
+
+    .chat-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+        flex-shrink: 0;
+    }
+
+    .chat-model-badge {
+        font-size: 0.75rem;
+        color: var(--text-dim);
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.2rem 0.6rem;
+        font-family: monospace;
+    }
+
+    .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 1.25rem;
+        padding-right: 0.25rem;
+        margin-bottom: 1rem;
+    }
+
+    .chat-messages::-webkit-scrollbar {
+        width: 4px;
+    }
+    .chat-messages::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    .chat-messages::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 4px;
+    }
+
+    .chat-bubble {
+        max-width: 80%;
+        padding: 0.75rem 1rem;
+        border-radius: 10px;
+        font-size: 0.9rem;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+
+    .chat-bubble-user {
+        align-self: flex-end;
+        background: var(--accent);
+        color: #fff;
+        border-bottom-right-radius: 2px;
+    }
+
+    .chat-bubble-assistant {
+        align-self: flex-start;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-bottom-left-radius: 2px;
+        width: 100%;
+        max-width: 100%;
+    }
+
+    .chat-bubble-wrapper {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+    }
+
+    .chat-bubble-wrapper-user {
+        align-items: flex-end;
+    }
+
+    .chat-bubble-wrapper-assistant {
+        align-items: flex-start;
+    }
+
+    .chat-cursor {
+        display: inline-block;
+        width: 2px;
+        height: 1em;
+        background: var(--accent);
+        margin-left: 1px;
+        vertical-align: text-bottom;
+        animation: blink 0.8s step-end infinite;
+    }
+
+    @keyframes blink {
+        50% { opacity: 0; }
+    }
+
+    .chat-sources {
+        font-size: 0.78rem;
+    }
+
+    .chat-sources summary {
+        cursor: pointer;
+        color: var(--text-dim);
+        user-select: none;
+        padding: 0.2rem 0;
+    }
+
+    .chat-sources summary:hover {
+        color: var(--text);
+    }
+
+    .chat-source-item {
+        margin-top: 0.5rem;
+        padding: 0.6rem 0.75rem;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        margin-bottom: 0.35rem;
+    }
+
+    .chat-source-meta {
+        color: var(--text-dim);
+        font-size: 0.72rem;
+        margin-bottom: 0.25rem;
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .chat-source-content {
+        color: var(--text);
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 80px;
+        overflow: hidden;
+        mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+    }
+
+    .chat-input-row {
+        display: flex;
+        gap: 0.75rem;
+        flex-shrink: 0;
+    }
+
+    .chat-input {
+        flex: 1;
+        padding: 0.75rem 1rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        font-size: 0.95rem;
+        outline: none;
+        resize: none;
+        font-family: inherit;
+        line-height: 1.5;
+        transition: border-color 0.2s;
+    }
+
+    .chat-input:focus {
+        border-color: var(--accent);
+    }
+
+    .chat-input::placeholder {
+        color: var(--text-dim);
+    }
+
+    .chat-send {
+        padding: 0.75rem 1.25rem;
+        background: var(--accent);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        cursor: pointer;
+        transition: background 0.2s;
+        align-self: flex-end;
+    }
+
+    .chat-send:hover:not(:disabled) {
+        background: var(--accent-hover);
+    }
+
+    .chat-send:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .chat-empty {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-dim);
+        gap: 0.5rem;
+        font-size: 0.95rem;
+    }
+
+    .chat-empty-icon {
+        font-size: 2.5rem;
+        margin-bottom: 0.25rem;
+    }
+</style>
+
+<div class="chat-layout" x-data="chatApp()">
+    <div class="chat-header">
+        <h1>Chat</h1>
+        <span class="chat-model-badge" x-text="'model: ' + model"></span>
+    </div>
+
+    <!-- Messages area -->
+    <div class="chat-messages" x-ref="messages">
+        <!-- Empty state -->
+        <template x-if="messages.length === 0">
+            <div class="chat-empty">
+                <div class="chat-empty-icon">💬</div>
+                <div>Ask anything about your knowledge base</div>
+                <div style="font-size:0.8rem">Relevant memories will be retrieved and shown as sources</div>
+            </div>
+        </template>
+
+        <!-- Message bubbles -->
+        <template x-for="(msg, idx) in messages" :key="idx">
+            <div :class="'chat-bubble-wrapper chat-bubble-wrapper-' + msg.role">
+                <!-- User bubble -->
+                <template x-if="msg.role === 'user'">
+                    <div class="chat-bubble chat-bubble-user" x-text="msg.content"></div>
+                </template>
+
+                <!-- Assistant bubble -->
+                <template x-if="msg.role === 'assistant'">
+                    <div style="width:100%">
+                        <div class="chat-bubble chat-bubble-assistant">
+                            <span x-text="msg.content"></span>
+                            <span class="chat-cursor" x-show="msg.streaming"></span>
+                            <template x-if="msg.streaming && msg.content === ''">
+                                <span style="color:var(--text-dim);font-style:italic">Thinking…</span>
+                            </template>
+                        </div>
+
+                        <!-- Sources -->
+                        <template x-if="msg.sources && msg.sources.length > 0">
+                            <details class="chat-sources">
+                                <summary x-text="msg.sources.length + ' source' + (msg.sources.length === 1 ? '' : 's') + ' retrieved'"></summary>
+                                <template x-for="(src, si) in msg.sources" :key="si">
+                                    <div class="chat-source-item">
+                                        <div class="chat-source-meta">
+                                            <span x-text="src.source || 'unknown'"></span>
+                                            <span x-text="'score: ' + src.score.toFixed(3)"></span>
+                                        </div>
+                                        <div class="chat-source-content" x-text="src.content"></div>
+                                    </div>
+                                </template>
+                            </details>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </template>
+    </div>
+
+    <!-- Input row -->
+    <div class="chat-input-row">
+        <textarea
+            class="chat-input"
+            x-model="input"
+            placeholder="Ask about your knowledge base…"
+            rows="2"
+            :disabled="streaming"
+            @keydown.enter.prevent="if (!$event.shiftKey && !streaming) send()"
+        ></textarea>
+        <button class="chat-send" :disabled="streaming || input.trim() === ''" @click="send()">Send</button>
+    </div>
+</div>
+
+<script>
+function chatApp() {
+    return {
+        model: {{ .Model | toJSON }},
+        messages: [],
+        input: '',
+        streaming: false,
+
+        historyForServer() {
+            // Send only completed (non-streaming) turns, stripped of UI-only fields.
+            return this.messages
+                .filter(m => !m.streaming)
+                .map(m => ({ role: m.role, content: m.content }));
+        },
+
+        scrollToBottom() {
+            this.$nextTick(() => {
+                const el = this.$refs.messages;
+                if (el) el.scrollTop = el.scrollHeight;
+            });
+        },
+
+        async send() {
+            const text = this.input.trim();
+            if (!text || this.streaming) return;
+
+            this.input = '';
+            this.messages.push({ role: 'user', content: text });
+
+            const assistantMsg = { role: 'assistant', content: '', sources: [], streaming: true };
+            this.messages.push(assistantMsg);
+            this.streaming = true;
+            this.scrollToBottom();
+
+            const history = this.historyForServer().slice(0, -1); // exclude the user msg we just added
+
+            try {
+                const response = await fetch('/ui/chat/stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text, history })
+                });
+
+                if (!response.ok) {
+                    assistantMsg.content = 'Error: request failed (' + response.status + ')';
+                    assistantMsg.streaming = false;
+                    this.streaming = false;
+                    return;
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                let currentEvent = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buf += decoder.decode(value, { stream: true });
+                    const lines = buf.split('\n');
+                    buf = lines.pop(); // keep incomplete line
+
+                    for (const line of lines) {
+                        if (line.startsWith('event: ')) {
+                            currentEvent = line.slice(7).trim();
+                        } else if (line.startsWith('data: ')) {
+                            const raw = line.slice(6);
+                            try {
+                                const parsed = JSON.parse(raw);
+                                if (currentEvent === 'sources') {
+                                    assistantMsg.sources = parsed;
+                                } else if (currentEvent === 'token') {
+                                    assistantMsg.content += parsed;
+                                    this.scrollToBottom();
+                                } else if (currentEvent === 'done') {
+                                    // stream finished
+                                } else if (currentEvent === 'error') {
+                                    assistantMsg.content += '\n[stream error]';
+                                }
+                            } catch (_) {
+                                // ignore malformed chunks
+                            }
+                            currentEvent = '';
+                        }
+                    }
+                }
+            } catch (err) {
+                assistantMsg.content = 'Error: ' + err.message;
+            }
+
+            assistantMsg.streaming = false;
+            this.streaming = false;
+            this.scrollToBottom();
+        }
+    };
+}
+</script>
+{{ end }}

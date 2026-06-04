@@ -307,13 +307,14 @@ function chatApp() {
 
             this.input = '';
             this.messages.push({ role: 'user', content: text });
-
-            const assistantMsg = { role: 'assistant', content: '', sources: [], streaming: true };
-            this.messages.push(assistantMsg);
+            this.messages.push({ role: 'assistant', content: '', sources: [], streaming: true });
             this.streaming = true;
             this.scrollToBottom();
 
-            const history = this.historyForServer().slice(0, -1); // exclude the user msg we just added
+            // Always reference through this.messages[idx] so Alpine's Proxy
+            // detects the mutations and updates the DOM.
+            const idx = this.messages.length - 1;
+            const history = this.historyForServer().slice(0, -1); // exclude user msg just added
 
             try {
                 const response = await fetch('/ui/chat/stream', {
@@ -323,8 +324,8 @@ function chatApp() {
                 });
 
                 if (!response.ok) {
-                    assistantMsg.content = 'Error: request failed (' + response.status + ')';
-                    assistantMsg.streaming = false;
+                    this.messages[idx].content = 'Error: request failed (' + response.status + ')';
+                    this.messages[idx].streaming = false;
                     this.streaming = false;
                     return;
                 }
@@ -350,14 +351,12 @@ function chatApp() {
                             try {
                                 const parsed = JSON.parse(raw);
                                 if (currentEvent === 'sources') {
-                                    assistantMsg.sources = parsed;
+                                    this.messages[idx].sources = parsed;
                                 } else if (currentEvent === 'token') {
-                                    assistantMsg.content += parsed;
+                                    this.messages[idx].content += parsed;
                                     this.scrollToBottom();
-                                } else if (currentEvent === 'done') {
-                                    // stream finished
                                 } else if (currentEvent === 'error') {
-                                    assistantMsg.content += '\n[stream error]';
+                                    this.messages[idx].content += '\n[stream error]';
                                 }
                             } catch (_) {
                                 // ignore malformed chunks
@@ -367,10 +366,10 @@ function chatApp() {
                     }
                 }
             } catch (err) {
-                assistantMsg.content = 'Error: ' + err.message;
+                this.messages[idx].content = 'Error: ' + err.message;
             }
 
-            assistantMsg.streaming = false;
+            this.messages[idx].streaming = false;
             this.streaming = false;
             this.scrollToBottom();
         }

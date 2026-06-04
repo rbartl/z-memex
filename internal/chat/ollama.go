@@ -16,6 +16,13 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+// StreamCallbacks holds the callbacks invoked during a streaming response.
+// OnThinking may be nil — in that case thinking tokens are silently ignored.
+type StreamCallbacks struct {
+	OnToken    func(string) error
+	OnThinking func(string) error
+}
+
 // Client streams chat completions from the Ollama /api/chat endpoint.
 type Client struct {
 	baseURL string
@@ -41,21 +48,33 @@ type ollamaChatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
 	Stream   bool      `json:"stream"`
+	Think    bool      `json:"think"`
+}
+
+// ollamaResponseMessage is the message field in a streaming chunk.
+// It extends the request Message with an optional Thinking field returned
+// by models that support extended reasoning (e.g. qwq, deepseek-r1).
+type ollamaResponseMessage struct {
+	Role     string `json:"role"`
+	Content  string `json:"content"`
+	Thinking string `json:"thinking"`
 }
 
 type ollamaChatChunk struct {
-	Message Message `json:"message"`
-	Done    bool    `json:"done"`
+	Message ollamaResponseMessage `json:"message"`
+	Done    bool                  `json:"done"`
 }
 
-// Stream calls Ollama /api/chat with streaming enabled and invokes onToken for
-// each content chunk. It returns when the stream is complete or the context is
-// cancelled. onToken must be safe to call from the streaming goroutine.
-func (c *Client) Stream(ctx context.Context, messages []Message, onToken func(string) error) error {
+// Stream calls Ollama /api/chat with streaming and think:true enabled.
+// Thinking tokens (if the model produces them) are forwarded to cbs.OnThinking;
+// response tokens are forwarded to cbs.OnToken. Either callback may return an
+// error to abort the stream early.
+func (c *Client) Stream(ctx context.Context, messages []Message, cbs StreamCallbacks) error {
 	body, err := json.Marshal(ollamaChatRequest{
 		Model:    c.model,
 		Messages: messages,
 		Stream:   true,
+		Think:    true, // no-op for models that don't support it
 	})
 	if err != nil {
 		return fmt.Errorf("chat: marshal request: %w", err)
@@ -89,8 +108,14 @@ func (c *Client) Stream(ctx context.Context, messages []Message, onToken func(st
 			return fmt.Errorf("chat: decode chunk: %w", err)
 		}
 
+		if chunk.Message.Thinking != "" && cbs.OnThinking != nil {
+			if err := cbs.OnThinking(chunk.Message.Thinking); err != nil {
+				return err
+			}
+		}
+
 		if chunk.Message.Content != "" {
-			if err := onToken(chunk.Message.Content); err != nil {
+			if err := cbs.OnToken(chunk.Message.Content); err != nil {
 				return err
 			}
 		}
@@ -134,6 +159,7 @@ func (c *Client) SynthesizeQuery(ctx context.Context, history []Message, latestU
 		Model:    c.model,
 		Messages: messages,
 		Stream:   false,
+		Think:    false, // keep query synthesis fast — no reasoning needed
 	})
 	if err != nil {
 		return "", fmt.Errorf("chat: synthesize query marshal: %w", err)

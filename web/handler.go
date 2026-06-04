@@ -21,7 +21,7 @@ import (
 // ChatStreamer streams a chat completion token-by-token and can synthesize
 // a context-aware search query from the conversation history.
 type ChatStreamer interface {
-	Stream(ctx context.Context, messages []chat.Message, onToken func(string) error) error
+	Stream(ctx context.Context, messages []chat.Message, cbs chat.StreamCallbacks) error
 	SynthesizeQuery(ctx context.Context, history []chat.Message, latestUserMsg string) (string, error)
 	Model() string
 }
@@ -406,12 +406,20 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	messages = append(messages, req.History...)
 	messages = append(messages, chat.Message{Role: "user", Content: req.Message})
 
-	// Stream the model response token by token.
-	if err := h.chat.Stream(r.Context(), messages, func(token string) error {
-		encoded, _ := json.Marshal(token)
-		_, err := fmt.Fprintf(w, "event: token\ndata: %s\n\n", encoded)
-		flusher.Flush()
-		return err
+	// Stream the model response, forwarding thinking and content tokens separately.
+	if err := h.chat.Stream(r.Context(), messages, chat.StreamCallbacks{
+		OnThinking: func(token string) error {
+			encoded, _ := json.Marshal(token)
+			_, err := fmt.Fprintf(w, "event: thinking\ndata: %s\n\n", encoded)
+			flusher.Flush()
+			return err
+		},
+		OnToken: func(token string) error {
+			encoded, _ := json.Marshal(token)
+			_, err := fmt.Fprintf(w, "event: token\ndata: %s\n\n", encoded)
+			flusher.Flush()
+			return err
+		},
 	}); err != nil {
 		slog.Error("chat stream error", "err", err)
 		sseEvent("error", `"stream error"`)

@@ -259,6 +259,56 @@
         margin-bottom: 0.25rem;
     }
 
+    /* Thinking block — shown above the response bubble when the model reasons */
+    .chat-thinking-block {
+        max-width: 80%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        font-size: 0.8rem;
+    }
+
+    .chat-thinking-block summary {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.45rem 0.75rem;
+        cursor: pointer;
+        user-select: none;
+        color: var(--text-dim);
+        background: var(--bg-card);
+        list-style: none;
+    }
+
+    .chat-thinking-block summary::before {
+        content: '▸';
+        font-size: 0.65rem;
+        transition: transform 0.15s;
+        flex-shrink: 0;
+    }
+
+    .chat-thinking-block[open] summary::before {
+        transform: rotate(90deg);
+    }
+
+    .chat-thinking-block summary:hover {
+        color: var(--text);
+    }
+
+    .chat-thinking-content {
+        padding: 0.6rem 0.75rem;
+        background: var(--bg);
+        color: var(--text-dim);
+        font-family: ui-monospace, monospace;
+        font-size: 0.78rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 240px;
+        overflow-y: auto;
+        border-top: 1px solid var(--border);
+    }
+
     /* Markdown rendering inside assistant bubbles */
     .chat-bubble-assistant p { margin: 0 0 0.6rem; }
     .chat-bubble-assistant p:last-child { margin-bottom: 0; }
@@ -348,13 +398,22 @@
 
                 <!-- Assistant bubble -->
                 <template x-if="msg.role === 'assistant'">
-                    <!-- Thinking pill — compact, only while no content yet -->
-                    <div class="chat-thinking" x-show="msg.streaming && msg.content === ''">
+                    <!-- Waiting pill: shown only before any content OR thinking arrives -->
+                    <div class="chat-thinking" x-show="msg.streaming && msg.content === '' && msg.thinking === ''">
                         <span>Thinking</span>
                         <span class="chat-thinking-dots">
                             <span></span><span></span><span></span>
                         </span>
                     </div>
+                </template>
+                <template x-if="msg.role === 'assistant' && msg.thinking !== ''">
+                    <!-- Real thinking block: streamed reasoning content from the model -->
+                    <details class="chat-thinking-block" :open="msg.streaming">
+                        <summary>
+                            <span x-text="msg.streaming && msg.content === '' ? 'Thinking…' : 'Reasoning'"></span>
+                        </summary>
+                        <div class="chat-thinking-content" x-text="msg.thinking"></div>
+                    </details>
                 </template>
                 <template x-if="msg.role === 'assistant' && msg.content !== ''">
                     <!-- Response bubble — appears once first token arrives -->
@@ -445,7 +504,7 @@ function chatApp() {
 
             this.input = '';
             this.messages.push({ role: 'user', content: text });
-            this.messages.push({ role: 'assistant', content: '', sources: [], streaming: true });
+            this.messages.push({ role: 'assistant', content: '', thinking: '', sources: [], streaming: true });
             this.streaming = true;
             this.scrollToBottom();
 
@@ -488,7 +547,10 @@ function chatApp() {
                             const raw = line.slice(6);
                             try {
                                 const parsed = JSON.parse(raw);
-                                if (currentEvent === 'sources') {
+                                if (currentEvent === 'thinking') {
+                                    this.messages[idx].thinking += parsed;
+                                    this.scrollToBottom();
+                                } else if (currentEvent === 'sources') {
                                     this.messages[idx].sources = parsed;
                                     this.accumulateSources(parsed);
                                 } else if (currentEvent === 'token') {

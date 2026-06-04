@@ -300,8 +300,9 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 
 // chatStreamRequest is the JSON body sent by the browser for each turn.
 type chatStreamRequest struct {
-	Message string         `json:"message"`
-	History []chat.Message `json:"history"`
+	Message      string         `json:"message"`
+	History      []chat.Message `json:"history"`
+	PriorSources []chatSource   `json:"prior_sources"` // accumulated from previous turns
 }
 
 // chatSource is a single retrieved memory serialised into the sources SSE event.
@@ -356,19 +357,44 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Send the source memories as the first event so the UI can render citations.
-	sources := make([]chatSource, len(recalled))
-	var contextBuilder strings.Builder
-	contextBuilder.WriteString("You are a helpful assistant with access to the user's personal knowledge base. Answer based on the context below. If the context is insufficient, say so honestly.\n\n## Knowledge base context\n\n")
-	for i, sm := range recalled {
-		sources[i] = chatSource{
-			ID:      sm.Memory.ID.String(),
+	// Merge newly retrieved memories with those accumulated from prior turns,
+	// deduplicating by ID so the context grows richer without repetition.
+	seen := make(map[string]bool, len(req.PriorSources)+len(recalled))
+	merged := make([]chatSource, 0, len(req.PriorSources)+len(recalled))
+
+	// Prior sources first (they carry lower scores but broaden context).
+	for _, ps := range req.PriorSources {
+		if !seen[ps.ID] {
+			seen[ps.ID] = true
+			merged = append(merged, ps)
+		}
+	}
+	// Newly retrieved sources override nothing — just add unseen ones.
+	newSources := make([]chatSource, 0, len(recalled))
+	for _, sm := range recalled {
+		id := sm.Memory.ID.String()
+		src := chatSource{
+			ID:      id,
 			Content: sm.Memory.Content,
 			Score:   sm.Score,
 			Source:  sm.Memory.Source,
 		}
-		fmt.Fprintf(&contextBuilder, "### Memory %d (score: %.2f, source: %s)\n%s\n\n", i+1, sm.Score, sm.Memory.Source, sm.Memory.Content)
+		newSources = append(newSources, src)
+		if !seen[id] {
+			seen[id] = true
+			merged = append(merged, src)
+		}
 	}
+
+	// Build system prompt from the full merged context.
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("You are a helpful assistant with access to the user's personal knowledge base. Answer based on the context below. If the context is insufficient, say so honestly.\n\n## Knowledge base context\n\n")
+	for i, src := range merged {
+		fmt.Fprintf(&contextBuilder, "### Memory %d (source: %s)\n%s\n\n", i+1, src.Source, src.Content)
+	}
+
+	// Send only the newly retrieved sources to the UI (the frontend accumulates them).
+	sources := newSources
 
 	srcJSON, _ := json.Marshal(sources)
 	sseEvent("sources", string(srcJSON))

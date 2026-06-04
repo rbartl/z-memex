@@ -353,12 +353,23 @@ function chatApp() {
         messages: [],
         input: '',
         streaming: false,
+        allSources: [],   // deduplicated pool of every memory retrieved so far
 
         historyForServer() {
             // Send only completed (non-streaming) turns, stripped of UI-only fields.
             return this.messages
                 .filter(m => !m.streaming)
                 .map(m => ({ role: m.role, content: m.content }));
+        },
+
+        accumulateSources(newSources) {
+            const seen = new Set(this.allSources.map(s => s.id));
+            for (const s of newSources) {
+                if (!seen.has(s.id)) {
+                    seen.add(s.id);
+                    this.allSources.push(s);
+                }
+            }
         },
 
         scrollToBottom() {
@@ -387,7 +398,7 @@ function chatApp() {
                 const response = await fetch('/ui/chat/stream', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text, history })
+                    body: JSON.stringify({ message: text, history, prior_sources: this.allSources })
                 });
 
                 if (!response.ok) {
@@ -419,6 +430,7 @@ function chatApp() {
                                 const parsed = JSON.parse(raw);
                                 if (currentEvent === 'sources') {
                                     this.messages[idx].sources = parsed;
+                                    this.accumulateSources(parsed);
                                 } else if (currentEvent === 'token') {
                                     this.messages[idx].content += parsed;
                                     this.scrollToBottom();

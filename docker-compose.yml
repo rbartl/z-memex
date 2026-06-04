@@ -31,6 +31,7 @@ services:
       EXTRACTOR: ${EXTRACTOR:-ollama}
       OLLAMA_EXTRACT_MODEL: ${OLLAMA_EXTRACT_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-}
     depends_on:
       postgres:
         condition: service_healthy

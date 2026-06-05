@@ -266,6 +266,17 @@
         border-radius: 8px;
         overflow: hidden;
         font-size: 0.8rem;
+        transition: border-color 0.3s;
+    }
+
+    .chat-thinking-block.is-streaming {
+        border-color: var(--accent);
+        animation: thinking-pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes thinking-pulse {
+        0%, 100% { border-color: var(--accent); box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 30%, transparent); }
+        50%       { border-color: var(--accent-hover); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
     }
 
     .chat-thinking-block summary {
@@ -291,8 +302,10 @@
         transform: rotate(90deg);
     }
 
-    .chat-thinking-block summary:hover {
-        color: var(--text);
+    .chat-thinking-block summary:hover { color: var(--text); }
+
+    .chat-thinking-block.is-streaming summary {
+        color: var(--accent);
     }
 
     .chat-thinking-content {
@@ -408,11 +421,19 @@
                 </template>
                 <template x-if="msg.role === 'assistant' && msg.thinking !== ''">
                     <!-- Real thinking block: streamed reasoning content from the model -->
-                    <details class="chat-thinking-block" :open="msg.streaming">
+                    <details
+                        class="chat-thinking-block"
+                        :class="{ 'is-streaming': msg.streaming && msg.content === '' }"
+                        :open="msg.streaming"
+                    >
                         <summary>
                             <span x-text="msg.streaming && msg.content === '' ? 'Thinking…' : 'Reasoning'"></span>
                         </summary>
-                        <div class="chat-thinking-content" x-text="msg.thinking"></div>
+                        <div
+                            class="chat-thinking-content"
+                            x-text="msg.thinking"
+                            x-effect="if (msg.streaming) { $el.scrollTop = $el.scrollHeight }"
+                        ></div>
                     </details>
                 </template>
                 <template x-if="msg.role === 'assistant' && msg.content !== ''">

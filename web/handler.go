@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -298,6 +299,13 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Bounds on how much accumulated context is fed to the model each turn, so a
+// long conversation can't grow the prompt past the model's context window.
+const (
+	maxContextSources = 12 // highest-scoring memories kept in the system prompt
+	maxHistoryTurns   = 20 // most recent history messages forwarded to the model
+)
+
 // chatStreamRequest is the JSON body sent by the browser for each turn.
 type chatStreamRequest struct {
 	Message      string         `json:"message"`
@@ -320,9 +328,16 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ask the model to synthesize the best search query given the full
+	// Forward only the most recent turns to keep the prompt bounded as the
+	// conversation grows.
+	history := req.History
+	if len(history) > maxHistoryTurns {
+		history = history[len(history)-maxHistoryTurns:]
+	}
+
+	// Ask the model to synthesize the best search query given the
 	// conversation context, so follow-up questions resolve correctly.
-	searchQuery, err := h.chat.SynthesizeQuery(r.Context(), req.History, req.Message)
+	searchQuery, err := h.chat.SynthesizeQuery(r.Context(), history, req.Message)
 	if err != nil {
 		slog.Warn("query synthesis failed, falling back to raw message", "err", err)
 		searchQuery = req.Message
@@ -386,7 +401,16 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build system prompt from the full merged context.
+	// Keep only the highest-scoring memories so the prompt stays bounded as the
+	// accumulated source pool grows across turns.
+	if len(merged) > maxContextSources {
+		sort.SliceStable(merged, func(i, j int) bool {
+			return merged[i].Score > merged[j].Score
+		})
+		merged = merged[:maxContextSources]
+	}
+
+	// Build system prompt from the (capped) merged context.
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("You are a helpful assistant with access to the user's personal knowledge base. Answer based on the context below. If the context is insufficient, say so honestly.\n\n## Knowledge base context\n\n")
 	for i, src := range merged {
@@ -403,7 +427,7 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	messages := []chat.Message{
 		{Role: "system", Content: contextBuilder.String()},
 	}
-	messages = append(messages, req.History...)
+	messages = append(messages, history...)
 	messages = append(messages, chat.Message{Role: "user", Content: req.Message})
 
 	// Stream the model response, forwarding thinking and content tokens separately.

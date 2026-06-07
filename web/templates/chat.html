@@ -437,9 +437,18 @@
                     </details>
                 </template>
                 <template x-if="msg.role === 'assistant' && msg.content !== ''">
-                    <!-- Response bubble — appears once first token arrives -->
+                    <!-- Response bubble — appears once first token arrives.
+                         While streaming we show raw text (cheap, updated every
+                         token); markdown is rendered once on completion to avoid
+                         re-parsing the whole message on every token. -->
                     <div class="chat-bubble chat-bubble-assistant">
-                        <span x-html="renderMarkdown(msg.content)"></span><span class="chat-cursor" x-show="msg.streaming"></span>
+                        <template x-if="msg.streaming">
+                            <span style="white-space: pre-wrap" x-text="msg.content"></span>
+                        </template>
+                        <template x-if="!msg.streaming">
+                            <span x-html="renderMarkdown(msg.content)"></span>
+                        </template>
+                        <span class="chat-cursor" x-show="msg.streaming"></span>
                     </div>
                 </template>
                 <template x-if="msg.role === 'assistant' && msg.sources && msg.sources.length > 0">
@@ -484,7 +493,9 @@ marked.use({
 });
 
 function renderMarkdown(text) {
-    return marked.parse(text || '');
+    // Sanitize the rendered HTML — marked v15 does not strip HTML, so model
+    // output (steered by knowledge-base content) could otherwise inject script.
+    return DOMPurify.sanitize(marked.parse(text || ''));
 }
 
 function chatApp() {
@@ -588,7 +599,9 @@ function chatApp() {
                     }
                 }
             } catch (err) {
-                this.messages[idx].content = 'Error: ' + err.message;
+                // Preserve whatever was already streamed; append the error.
+                const prefix = this.messages[idx].content ? this.messages[idx].content + '\n\n' : '';
+                this.messages[idx].content = prefix + 'Error: ' + err.message;
             }
 
             this.messages[idx].streaming = false;

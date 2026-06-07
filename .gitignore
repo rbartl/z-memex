@@ -1,3 +1,4 @@
 .claude
 .envrc
 node_modules
+.playwright-mcp

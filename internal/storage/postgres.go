@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,15 +17,31 @@ type Postgres struct {
 }
 
 func NewPostgres(ctx context.Context, url string) (*Postgres, error) {
-	pool, err := pgxpool.New(ctx, url)
+	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		return nil, fmt.Errorf("pgxpool.New: %w", err)
+		return nil, fmt.Errorf("pgxpool.ParseConfig: %w", err)
+	}
+
+	// An HNSW index scan returns at most hnsw.ef_search rows. The pgvector
+	// default (40) sits below the candidate pool SearchHybrid asks for, which
+	// would quietly starve the vector half of the hybrid ranking, so raise it
+	// on every pooled connection to match.
+	efSearch := max(memory.DefaultScoringConfig.CandidateK, hnswDefaultEfSearch)
+	cfg.ConnConfig.RuntimeParams["hnsw.ef_search"] = strconv.Itoa(efSearch)
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("pgxpool.NewWithConfig: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("postgres ping: %w", err)
 	}
 	return &Postgres{pool: pool}, nil
 }
+
+// hnswDefaultEfSearch mirrors pgvector's own default, used as a floor so a
+// small CandidateK can never lower recall below stock behaviour.
+const hnswDefaultEfSearch = 40
 
 func (p *Postgres) Close() {
 	p.pool.Close()

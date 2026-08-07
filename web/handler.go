@@ -11,13 +11,32 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/httprate"
 	"github.com/google/uuid"
 
 	"gitlab.com/zollneritsch/memex/internal/chat"
+	"gitlab.com/zollneritsch/memex/internal/httpmw"
 	"gitlab.com/zollneritsch/memex/internal/memory"
 )
+
+// uiRateLimit bounds requests per client IP to slow down credential
+// brute-forcing against basic auth. The budget has to clear normal browsing by
+// a wide margin: every page load pulls four vendored scripts, the memory
+// search box fires on keystroke (300ms debounce), and the graph refetches on
+// filter changes. Four requests a second still reduces online password
+// guessing to a crawl.
+const (
+	uiRateLimitRequests = 240
+	uiRateLimitWindow   = time.Minute
+)
+
+// maxChatRequestBytes caps the chat request body. Each turn carries the
+// accumulated history and prior sources, so the ceiling is higher than a plain
+// form post, but still bounded.
+const maxChatRequestBytes = 1 << 20
 
 // ChatStreamer streams a chat completion token-by-token and can synthesize
 // a context-aware search query from the conversation history.
@@ -133,6 +152,8 @@ func (h *Handler) basicAuth(next http.Handler) http.Handler {
 
 func (h *Handler) Router() http.Handler {
 	r := chi.NewRouter()
+	r.Use(httpmw.SecurityHeaders)
+	r.Use(httprate.LimitByIP(uiRateLimitRequests, uiRateLimitWindow))
 	r.Use(h.basicAuth)
 
 	r.Get("/", h.handleMemories)
@@ -323,6 +344,7 @@ type chatSource struct {
 
 func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	var req chatStreamRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatRequestBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return

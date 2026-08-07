@@ -85,6 +85,12 @@ func main() {
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: r,
+		// Bound how long a client may take to send its headers, and how long an
+		// idle keep-alive connection is held, so a slow-loris client can't tie
+		// up connections. WriteTimeout is deliberately unset: the chat UI
+		// streams SSE responses that outlive any fixed write deadline.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

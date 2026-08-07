@@ -2,15 +2,20 @@ package mcp
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/httprate"
 	"github.com/google/uuid"
+	"gitlab.com/zollneritsch/memex/internal/httpmw"
 	"gitlab.com/zollneritsch/memex/internal/memory"
 )
 
@@ -39,19 +44,38 @@ func NewServer(svc MemoryService, authToken string) *Server {
 	}
 }
 
+// mcpRateLimitRequests/Window bound requests per client IP to slow down
+// token brute-forcing against the MCP endpoint. The budget is generous — an
+// agent can burst a dozen tool calls in a turn — because the endpoint is
+// already gated by a high-entropy bearer token; the limiter only needs to make
+// online guessing impractical.
+const (
+	mcpRateLimitRequests = 120
+	mcpRateLimitWindow   = time.Minute
+)
+
+// maxRequestBytes caps the JSON-RPC request body. Memories are prose, so a
+// megabyte is far beyond any legitimate call, and the cap keeps a malformed or
+// hostile client from forcing an unbounded allocation.
+const maxRequestBytes = 1 << 20
+
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(s.authMiddleware)
+	r.Use(httpmw.SecurityHeaders)
 
-	// MCP over HTTP (JSON-RPC style)
-	r.Post("/mcp", s.handleMCP)
-
-	// Health check (no auth)
+	// Health check (no auth, not rate limited — used by uptime monitors).
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// MCP over HTTP (JSON-RPC style)
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.LimitByIP(mcpRateLimitRequests, mcpRateLimitWindow))
+		r.Use(s.authMiddleware)
+		r.Post("/mcp", s.handleMCP)
 	})
 
 	return r
@@ -59,13 +83,9 @@ func (s *Server) Router() http.Handler {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
-			next.ServeHTTP(w, r)
-			return
-		}
 		token := r.Header.Get("Authorization")
 		token = strings.TrimPrefix(token, "Bearer ")
-		if token != s.authToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -96,8 +116,14 @@ type mcpError struct {
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	var req mcpRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, nil, -32700, "parse error")
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			s.writeError(w, nil, codeInvalidRequest, "request body too large")
+			return
+		}
+		s.writeError(w, nil, codeParseError, "parse error")
 		return
 	}
 
@@ -127,7 +153,13 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), ctxSource, source)
 	result, err := s.dispatch(ctx, req.Method, req.Params)
 	if err != nil {
-		s.writeError(w, req.ID, -32603, err.Error())
+		var re *rpcError
+		if errors.As(err, &re) {
+			s.writeError(w, req.ID, re.code, re.msg)
+			return
+		}
+		slog.Error("mcp request failed", "method", req.Method, "err", err)
+		s.writeError(w, req.ID, codeInternalError, "internal error")
 		return
 	}
 
@@ -153,7 +185,7 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 	case "tools/call":
 		return s.handleToolCall(ctx, params)
 	default:
-		return nil, fmt.Errorf("unknown method: %s", method)
+		return nil, notFound("unknown method: %s", method)
 	}
 }
 
@@ -258,11 +290,18 @@ type toolCallParams struct {
 func (s *Server) handleToolCall(ctx context.Context, raw json.RawMessage) (any, error) {
 	var p toolCallParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return nil, err
+		return nil, invalidInput("malformed tools/call params: %v", err)
 	}
 
+	// Arguments are optional (manage_memories takes none), but if present they
+	// must parse — silently dropping them would surface as a confusing
+	// "required argument missing" further down.
 	var args map[string]any
-	_ = json.Unmarshal(p.Arguments, &args)
+	if len(p.Arguments) > 0 {
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return nil, invalidInput("malformed arguments for %s: %v", p.Name, err)
+		}
+	}
 
 	switch p.Name {
 	case "store_memory":
@@ -274,7 +313,7 @@ func (s *Server) handleToolCall(ctx context.Context, raw json.RawMessage) (any, 
 	case "delete_memory":
 		return s.toolDeleteMemory(ctx, args)
 	default:
-		return nil, fmt.Errorf("unknown tool: %s", p.Name)
+		return nil, notFound("unknown tool: %s", p.Name)
 	}
 }
 
@@ -283,7 +322,7 @@ func (s *Server) handleToolCall(ctx context.Context, raw json.RawMessage) (any, 
 func (s *Server) toolStoreMemory(ctx context.Context, args map[string]any) (any, error) {
 	content := stringArg(args, "content")
 	if content == "" {
-		return nil, fmt.Errorf("content is required")
+		return nil, invalidInput("content is required")
 	}
 	source, _ := ctx.Value(ctxSource).(string)
 	sessionID := stringArg(args, "session_id")
@@ -340,7 +379,7 @@ func (s *Server) toolDeleteMemory(ctx context.Context, args map[string]any) (any
 	idStr := stringArg(args, "id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid id: %w", err)
+		return nil, invalidInput("invalid id: %v", err)
 	}
 	if err := s.svc.DeleteMemory(ctx, id); err != nil {
 		return nil, err
@@ -349,6 +388,36 @@ func (s *Server) toolDeleteMemory(ctx context.Context, args map[string]any) (any
 }
 
 // --- Helpers ---
+
+// JSON-RPC 2.0 error codes.
+const (
+	codeParseError     = -32700
+	codeInvalidRequest = -32600
+	codeMethodNotFound = -32601
+	codeInvalidParams  = -32602
+	codeInternalError  = -32603
+)
+
+// rpcError is a client-facing error: its message is safe to return verbatim
+// and it carries the JSON-RPC code to report. Everything else — DB, embedding,
+// and LLM failures — is logged server-side and reported as a bare internal
+// error, so implementation details never reach the client.
+type rpcError struct {
+	code int
+	msg  string
+}
+
+func (e *rpcError) Error() string { return e.msg }
+
+// invalidInput reports a malformed or missing tool argument.
+func invalidInput(format string, args ...any) error {
+	return &rpcError{code: codeInvalidParams, msg: fmt.Sprintf(format, args...)}
+}
+
+// notFound reports an unknown method or tool name.
+func notFound(format string, args ...any) error {
+	return &rpcError{code: codeMethodNotFound, msg: fmt.Sprintf(format, args...)}
+}
 
 func toolResult(text string) map[string]any {
 	return map[string]any{
@@ -370,7 +439,6 @@ func intArg(args map[string]any, key string, def int) int {
 	}
 	return def
 }
-
 
 func stringSliceArg(args map[string]any, key string) []string {
 	v, ok := args[key].([]any)

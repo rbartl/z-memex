@@ -76,7 +76,7 @@ func (p *Postgres) SaveMemory(ctx context.Context, m *memory.Memory, embedding [
 
 func (p *Postgres) FindByContentHash(ctx context.Context, hash string) (*memory.Memory, error) {
 	row := p.pool.QueryRow(ctx, `
-		SELECT id, content, content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
+		SELECT id, content, COALESCE(content_hash, '') AS content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
 		FROM memories WHERE content_hash = $1
 	`, hash)
 	m := &memory.Memory{}
@@ -89,7 +89,7 @@ func (p *Postgres) FindByContentHash(ctx context.Context, hash string) (*memory.
 
 func (p *Postgres) GetMemory(ctx context.Context, id uuid.UUID) (*memory.Memory, error) {
 	row := p.pool.QueryRow(ctx, `
-		SELECT id, content, content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
+		SELECT id, content, COALESCE(content_hash, '') AS content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
 		FROM memories WHERE id = $1
 	`, id)
 	m := &memory.Memory{}
@@ -98,7 +98,7 @@ func (p *Postgres) GetMemory(ctx context.Context, id uuid.UUID) (*memory.Memory,
 
 func (p *Postgres) ListMemories(ctx context.Context, filter memory.Filter) ([]*memory.Memory, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, content, content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
+		SELECT id, content, COALESCE(content_hash, '') AS content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at
 		FROM memories
 		WHERE ($1::text IS NULL OR source = $1)
 		  AND ($2::text[] IS NULL OR tags && $2)
@@ -153,7 +153,7 @@ func (p *Postgres) DeleteMemory(ctx context.Context, id uuid.UUID) error {
 func (p *Postgres) SearchSimilar(ctx context.Context, embedding []float32, topK int, minScore float32) ([]memory.ScoredMemory, error) {
 	vec := pgvector.NewVector(embedding)
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, content, content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at,
+		SELECT id, content, COALESCE(content_hash, '') AS content_hash, summary, source, session_id, tags, importance, access_count, last_accessed_at, created_at, updated_at,
 		       1 - (embedding <=> $1) AS score
 		FROM memories
 		WHERE embedding IS NOT NULL
@@ -217,7 +217,7 @@ func (p *Postgres) SearchHybrid(ctx context.Context, query string, embedding []f
 			FROM vector_candidates v
 			FULL OUTER JOIN fulltext_candidates f ON v.id = f.id
 		)
-		SELECT m.id, m.content, m.content_hash, m.summary, m.source, m.session_id,
+		SELECT m.id, m.content, COALESCE(m.content_hash, '') AS content_hash, m.summary, m.source, m.session_id,
 		       m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
 		       (
 		           1.0 / ($5::double precision + c.vrank::double precision)
@@ -461,7 +461,7 @@ func uuidKeys(m map[uuid.UUID]bool) []uuid.UUID {
 
 func (p *Postgres) GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*memory.Memory, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT m.id, m.content, m.content_hash, m.summary, m.source, m.session_id, m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at
+		SELECT m.id, m.content, COALESCE(m.content_hash, '') AS content_hash, m.summary, m.source, m.session_id, m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at
 		FROM memories m
 		JOIN memory_entities me ON me.memory_id = m.id
 		WHERE me.entity_id = $1
@@ -503,7 +503,7 @@ func (p *Postgres) GetEntityTypes(ctx context.Context) ([]string, error) {
 func (p *Postgres) GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]memory.RelatedMemory, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT
-			m.id, m.content, m.content_hash, m.summary, m.source, m.session_id, m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
+			m.id, m.content, COALESCE(m.content_hash, '') AS content_hash, m.summary, m.source, m.session_id, m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
 			e.id AS entity_id, e.name AS entity_name, e.entity_type
 		FROM memory_entities me1
 		JOIN memory_entities me2 ON me2.entity_id = me1.entity_id AND me2.memory_id != me1.memory_id

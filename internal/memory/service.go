@@ -257,16 +257,19 @@ func (s *Service) crossConnect(ctx context.Context, m *Memory, vec []float32) {
 		return
 	}
 
+	// Fetch the taxonomy once — it is the same for every neighbour, and
+	// querying it inside the loop cost a round trip per comparison.
+	knownTypes, err := s.store.GetEntityTypes(ctx)
+	if err != nil {
+		slog.Warn("failed to fetch entity types for cross-connect", "err", err)
+	}
+
 	var connected int
 	for _, n := range neighbors {
 		if n.Memory.ID == m.ID {
 			continue
 		}
 
-		knownTypes, err := s.store.GetEntityTypes(ctx)
-		if err != nil {
-			slog.Warn("failed to fetch entity types for cross-connect", "err", err)
-		}
 		relations, err := s.extract.ExtractCrossRelations(ctx, m.Content, n.Memory.Content, knownTypes)
 		if err != nil {
 			slog.Warn("cross-relation extraction failed", "memory_id", m.ID, "neighbor_id", n.Memory.ID, "err", err)
@@ -316,6 +319,13 @@ func (s *Service) crossConnect(ctx context.Context, m *Memory, vec []float32) {
 // RecallMemory does hybrid search using RRF over vector + full-text candidates,
 // boosted by importance, recency, and access frequency.
 func (s *Service) RecallMemory(ctx context.Context, query string, topK int) ([]ScoredMemory, error) {
+	switch {
+	case topK <= 0:
+		topK = 5
+	case topK > maxRecallTopK:
+		topK = maxRecallTopK
+	}
+
 	vec, err := s.embed.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
@@ -388,9 +398,21 @@ func (s *Service) GetContext(ctx context.Context, query string, topK int) (strin
 	return sb.String(), nil
 }
 
+// Result-set bounds. These values arrive from MCP tool arguments, so they are
+// clamped rather than trusted: a negative LIMIT makes Postgres error outright,
+// and an unbounded one would pull the whole table into a tool response.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 500
+	maxRecallTopK    = 100
+)
+
 func (s *Service) ListMemories(ctx context.Context, filter Filter) ([]*Memory, error) {
-	if filter.Limit == 0 {
-		filter.Limit = 50
+	switch {
+	case filter.Limit <= 0:
+		filter.Limit = defaultListLimit
+	case filter.Limit > maxListLimit:
+		filter.Limit = maxListLimit
 	}
 	return s.store.ListMemories(ctx, filter)
 }

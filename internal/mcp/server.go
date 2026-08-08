@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -32,15 +33,94 @@ type MemoryService interface {
 }
 
 type Server struct {
-	svc        MemoryService
-	authToken  string
-	clientName string // populated from MCP initialize clientInfo
+	svc       MemoryService
+	authToken string
+
+	// mu guards sessions. Every HTTP request runs on its own goroutine, so the
+	// client-name lookup below must not touch shared state unguarded.
+	mu       sync.Mutex
+	sessions map[string]*clientSession
+}
+
+// clientSession remembers which MCP client owns a session id, so a memory is
+// attributed to the tool that actually stored it. This has to be per-session
+// rather than per-server: several clients (Claude Code, Cursor, Claude Desktop)
+// talk to one memex instance concurrently, and a single shared field would tag
+// every memory with whichever client initialized most recently.
+type clientSession struct {
+	name     string
+	lastSeen time.Time
 }
 
 func NewServer(svc MemoryService, authToken string) *Server {
 	return &Server{
 		svc:       svc,
 		authToken: authToken,
+		sessions:  make(map[string]*clientSession),
+	}
+}
+
+const (
+	// sessionHeader is the MCP streamable-HTTP session header. The server
+	// assigns an id on initialize; compliant clients echo it on every
+	// subsequent request.
+	sessionHeader = "Mcp-Session-Id"
+
+	// sessionTTL is how long an idle session keeps its client attribution.
+	sessionTTL = 24 * time.Hour
+
+	// maxSessions caps the session table so repeated initialize calls cannot
+	// grow it without bound.
+	maxSessions = 1024
+)
+
+// registerSession records a client name and returns its new session id.
+func (s *Server) registerSession(name string) string {
+	id := uuid.NewString()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	s.sessions[id] = &clientSession{name: name, lastSeen: time.Now()}
+	return id
+}
+
+// clientName returns the client that owns a session id, refreshing its TTL.
+// An empty string means the session is unknown or expired.
+func (s *Server) clientName(id string) string {
+	if id == "" {
+		return ""
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return ""
+	}
+	sess.lastSeen = time.Now()
+	return sess.name
+}
+
+// pruneLocked drops expired sessions, then the least recently used ones if the
+// table is still at capacity. Callers must hold s.mu.
+func (s *Server) pruneLocked() {
+	cutoff := time.Now().Add(-sessionTTL)
+	for id, sess := range s.sessions {
+		if sess.lastSeen.Before(cutoff) {
+			delete(s.sessions, id)
+		}
+	}
+
+	for len(s.sessions) >= maxSessions {
+		var oldestID string
+		var oldest time.Time
+		for id, sess := range s.sessions {
+			if oldestID == "" || sess.lastSeen.Before(oldest) {
+				oldestID, oldest = id, sess.lastSeen
+			}
+		}
+		delete(s.sessions, oldestID)
 	}
 }
 
@@ -127,6 +207,8 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionID := r.Header.Get(sessionHeader)
+
 	if req.Method == "initialize" {
 		var initParams struct {
 			ClientInfo struct {
@@ -134,16 +216,27 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				Version string `json:"version"`
 			} `json:"clientInfo"`
 		}
-		if err := json.Unmarshal(req.Params, &initParams); err == nil && initParams.ClientInfo.Name != "" {
-			s.clientName = initParams.ClientInfo.Name
+		var name string
+		if err := json.Unmarshal(req.Params, &initParams); err == nil {
+			name = initParams.ClientInfo.Name
 		}
+		if name == "" {
+			name = r.UserAgent()
+		}
+
+		sessionID = s.registerSession(name)
+		w.Header().Set(sessionHeader, sessionID)
 		slog.Info("new client connected",
 			"remote_addr", r.RemoteAddr,
-			"client", s.clientName,
+			"client", name,
+			"session", sessionID,
 		)
 	}
 
-	source := s.clientName
+	// Attribute the memory to the client that owns this session. Clients that
+	// don't echo the session header fall back to their User-Agent rather than
+	// borrowing another client's identity.
+	source := s.clientName(sessionID)
 	if source == "" {
 		source = r.UserAgent()
 	}

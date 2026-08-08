@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/google/uuid"
 
 	"gitlab.com/zollneritsch/memex/internal/chat"
@@ -153,7 +152,7 @@ func (h *Handler) basicAuth(next http.Handler) http.Handler {
 func (h *Handler) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(httpmw.SecurityHeaders)
-	r.Use(httprate.LimitByIP(uiRateLimitRequests, uiRateLimitWindow))
+	r.Use(httpmw.RateLimitByClientIP(uiRateLimitRequests, uiRateLimitWindow))
 	r.Use(h.basicAuth)
 
 	r.Get("/", h.handleMemories)

@@ -2,7 +2,37 @@
 // MCP servers.
 package httpmw
 
-import "net/http"
+import (
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/httprate"
+)
+
+// RateLimitByClientIP bounds requests per client IP over the given window.
+//
+// The client is identified by the peer address of the TCP connection. memex
+// publishes its port directly (see docker-compose.yml), so that address is the
+// real caller and cannot be spoofed — unlike X-Forwarded-For, which any client
+// could set to dodge the limit.
+//
+// A deployment that fronts memex with a reverse proxy, load balancer, or CDN
+// must swap ClientIPFromRemoteAddr for middleware.ClientIPFromXFF (or
+// ClientIPFromHeader) and name the trusted proxies. Otherwise every client
+// arrives wearing the proxy's address and shares a single bucket, so one busy
+// user locks out everyone else.
+func RateLimitByClientIP(requests int, window time.Duration) func(http.Handler) http.Handler {
+	limiter := httprate.LimitBy(requests, window, func(r *http.Request) (string, error) {
+		return httprate.CanonicalizeIP(middleware.GetClientIP(r.Context())), nil
+	})
+
+	// ClientIPFromRemoteAddr must run first so the resolved IP is in the
+	// context by the time the limiter reads it.
+	return func(next http.Handler) http.Handler {
+		return middleware.ClientIPFromRemoteAddr(limiter(next))
+	}
+}
 
 // SecurityHeaders sets a baseline of defensive response headers.
 //

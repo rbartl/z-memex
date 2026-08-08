@@ -14,7 +14,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/httprate"
 	"github.com/google/uuid"
 	"gitlab.com/zollneritsch/memex/internal/httpmw"
 	"gitlab.com/zollneritsch/memex/internal/memory"
@@ -153,7 +152,7 @@ func (s *Server) Router() http.Handler {
 
 	// MCP over HTTP (JSON-RPC style)
 	r.Group(func(r chi.Router) {
-		r.Use(httprate.LimitByIP(mcpRateLimitRequests, mcpRateLimitWindow))
+		r.Use(httpmw.RateLimitByClientIP(mcpRateLimitRequests, mcpRateLimitWindow))
 		r.Use(s.authMiddleware)
 		r.Post("/mcp", s.handleMCP)
 	})

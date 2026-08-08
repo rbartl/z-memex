@@ -493,8 +493,8 @@ marked.use({
 });
 
 function renderMarkdown(text) {
-    // Sanitize the rendered HTML — marked v15 does not strip HTML, so model
-    // output (steered by knowledge-base content) could otherwise inject script.
+    // Sanitize the rendered HTML — marked does not strip HTML, so model output
+    // (steered by knowledge-base content) could otherwise inject script.
     return DOMPurify.sanitize(marked.parse(text || ''));
 }
 

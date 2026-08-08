@@ -356,24 +356,25 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		history = history[len(history)-maxHistoryTurns:]
 	}
 
-	// Ask the model to synthesize the best search query given the
-	// conversation context, so follow-up questions resolve correctly.
+	// Ask the model to rewrite the question into a better search query, so
+	// follow-ups resolve pronouns against the earlier conversation.
 	searchQuery, err := h.chat.SynthesizeQuery(r.Context(), history, req.Message)
-	if err != nil {
-		slog.Warn("query synthesis failed, falling back to raw message", "err", err)
+	if err != nil || searchQuery == "" {
+		if err != nil {
+			slog.Warn("query synthesis failed, falling back to raw message", "err", err)
+		}
 		searchQuery = req.Message
 	}
 
-	// Retrieve relevant memories (skip if the model decided no lookup is needed).
-	var recalled []memory.ScoredMemory
-	if searchQuery != "" {
-		slog.Info("chat recall", "query", searchQuery)
-		recalled, err = h.svc.RecallMemory(r.Context(), searchQuery, 5)
-		if err != nil {
-			slog.Error("chat recall failed", "err", err)
-			http.Error(w, "recall failed", http.StatusInternalServerError)
-			return
-		}
+	// Always retrieve. The rewrite is an optimization, never a gate: letting it
+	// decide that a question needs no lookup means one uncooperative response
+	// silently hides the whole knowledge base from the model.
+	slog.Info("chat recall", "query", searchQuery)
+	recalled, err := h.svc.RecallMemory(r.Context(), searchQuery, 5)
+	if err != nil {
+		slog.Error("chat recall failed", "err", err)
+		http.Error(w, "recall failed", http.StatusInternalServerError)
+		return
 	}
 
 	// Set SSE headers before writing anything.
@@ -434,6 +435,11 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// Build system prompt from the (capped) merged context.
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("You are a helpful assistant with access to the user's personal knowledge base. Answer based on the context below. If the context is insufficient, say so honestly.\n\n## Knowledge base context\n\n")
+	if len(merged) == 0 {
+		// Say it outright rather than leaving a bare heading, which reads to the
+		// model as a malformed prompt instead of an empty result.
+		contextBuilder.WriteString("(No relevant memories were found for this question.)\n\n")
+	}
 	for i, src := range merged {
 		fmt.Fprintf(&contextBuilder, "### Memory %d (source: %s)\n%s\n\n", i+1, src.Source, src.Content)
 	}

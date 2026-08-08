@@ -136,12 +136,47 @@ const queryRewritePrompt = `You are a search query synthesizer for a personal kn
 
 Given the conversation below, output the single most useful search query to retrieve relevant memories that would help answer the user's latest message. Take into account the full conversation context to resolve pronouns and references (e.g. "her" → the person mentioned earlier).
 
-Reply with ONLY the raw search query string — no quotes, no explanation, no punctuation at the end.
-If the latest message is chit-chat, a greeting, or requires no knowledge lookup, reply with exactly: NONE`
+The knowledge base stores facts about the user: their preferences, projects, tools, decisions, colleagues, and belongings. Assume the answer may well be in there — questions about what the user owns, uses, prefers, or has decided are exactly what it is for.
+
+Reply with ONLY the raw search query string — no quotes, no explanation, no punctuation at the end.`
+
+// maxSynthesizedQueryLen bounds a synthesized query. Anything longer means the
+// model ignored the instruction and wrote prose, which makes a worse search
+// query than the user's own words.
+const maxSynthesizedQueryLen = 300
+
+// cleanQuery normalizes a synthesized query, falling back to the user's raw
+// message whenever the model's answer is unusable.
+//
+// The fallback matters more than the rewrite: an empty query used to skip
+// retrieval altogether, so one uncooperative response silently cost the model
+// its entire knowledge base. Searching with the user's own words is always
+// better than searching with nothing.
+func cleanQuery(raw, fallback string) string {
+	// Models sometimes add a preamble or trailing commentary; the query itself
+	// is on the first non-empty line.
+	query := ""
+	for line := range strings.SplitSeq(raw, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			query = line
+			break
+		}
+	}
+
+	query = strings.TrimSpace(strings.Trim(strings.TrimSpace(query), `"'`))
+
+	// "none" is not an instruction any more, but models still volunteer it for
+	// greetings — treat it as "no useful rewrite", not "do not search".
+	if query == "" || strings.EqualFold(query, "none") || len(query) > maxSynthesizedQueryLen {
+		return fallback
+	}
+	return query
+}
 
 // SynthesizeQuery sends the conversation to the model and asks it to produce
-// the best knowledge-base search query given the full context. Returns an
-// empty string when the model decides no retrieval is needed.
+// the best knowledge-base search query given the full context. It never
+// returns an empty string: if the model's answer is unusable, the user's own
+// message is returned so retrieval still happens.
 func (c *Client) SynthesizeQuery(ctx context.Context, history []Message, latestUserMsg string) (string, error) {
 	// Build a compact conversation transcript for the prompt.
 	var sb strings.Builder
@@ -186,9 +221,5 @@ func (c *Client) SynthesizeQuery(ctx context.Context, history []Message, latestU
 		return "", fmt.Errorf("chat: synthesize query decode: %w", err)
 	}
 
-	query := strings.TrimSpace(result.Message.Content)
-	if strings.EqualFold(query, "none") {
-		return "", nil
-	}
-	return query, nil
+	return cleanQuery(result.Message.Content, latestUserMsg), nil
 }

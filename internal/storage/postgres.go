@@ -189,7 +189,7 @@ func (p *Postgres) SearchHybrid(ctx context.Context, query string, embedding []f
 	// Decay constant: ln(2) / half_life_days
 	decayLambda := math.Ln2 / cfg.RecencyHalfLifeDays
 
-	rows, err := p.pool.Query(ctx, `
+	rows, err := p.pool.Query(ctx, fmt.Sprintf(`
 		WITH vector_candidates AS (
 			SELECT id,
 			       ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS vrank
@@ -199,9 +199,7 @@ func (p *Postgres) SearchHybrid(ctx context.Context, query string, embedding []f
 			LIMIT $2
 		),
 		fts_query AS (
-			SELECT to_tsquery('english',
-				replace(plainto_tsquery('english', $4)::text, ' & ', ' | ')
-			) AS q
+			SELECT %s AS q
 		),
 		fulltext_candidates AS (
 			SELECT id,
@@ -221,7 +219,7 @@ func (p *Postgres) SearchHybrid(ctx context.Context, query string, embedding []f
 		       m.tags, m.importance, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
 		       (
 		           1.0 / ($5::double precision + c.vrank::double precision)
-		         + 1.0 / ($5::double precision + c.frank::double precision)
+		         + $10::double precision / ($5::double precision + c.frank::double precision)
 		         + $6::double precision * (m.importance - 1)::double precision / 4.0
 		         + $7::double precision * exp(-$8::double precision * EXTRACT(EPOCH FROM (NOW() - m.created_at)) / 86400.0)
 		         + $9::double precision * LEAST(1.0, ln(1.0 + m.access_count::double precision) / ln(21.0))
@@ -230,8 +228,9 @@ func (p *Postgres) SearchHybrid(ctx context.Context, query string, embedding []f
 		JOIN memories m ON m.id = c.id
 		ORDER BY score DESC
 		LIMIT $3
-	`, vec, cfg.CandidateK, topK, query,
+	`, cfg.FullText.TsqueryExpr()), vec, cfg.CandidateK, topK, query,
 		cfg.RRFConstant, cfg.ImportanceWeight, cfg.RecencyWeight, decayLambda, cfg.AccessWeight,
+		cfg.FullTextWeight,
 	)
 	if err != nil {
 		return nil, err

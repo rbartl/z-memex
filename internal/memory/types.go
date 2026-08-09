@@ -92,21 +92,90 @@ type ExtractedRelation struct {
 	Confidence   float64 `json:"confidence"`
 }
 
+// FullTextMode selects how the lexical half of hybrid search turns the query
+// string into a tsquery. It is the main lever on retrieval precision: the
+// vector half supplies recall, so the full-text half is only useful when it is
+// selective.
+type FullTextMode string
+
+const (
+	// FullTextAll requires every term to be present (plainto_tsquery). Precise,
+	// and contributes nothing when no memory contains all the terms — which is
+	// the correct behaviour for a complement to vector search.
+	FullTextAll FullTextMode = "all"
+
+	// FullTextWebsearch behaves like FullTextAll but also honours quoted
+	// phrases, OR, and -negation in the query string (websearch_to_tsquery).
+	FullTextWebsearch FullTextMode = "websearch"
+
+	// FullTextAny ORs every term together. Matches a large fraction of any
+	// corpus, so it ranks documents that merely repeat a common term and
+	// dilutes the vector signal through RRF. Kept for comparison.
+	FullTextAny FullTextMode = "any"
+
+	// FullTextOff disables the lexical half, leaving pure vector search.
+	FullTextOff FullTextMode = "off"
+)
+
+// tsqueryExpr returns the SQL expression building the tsquery for this mode.
+// The result is a fixed literal chosen from this closed set — never anything
+// derived from user input — so it is safe to interpolate into the query.
+func (m FullTextMode) tsqueryExpr() string {
+	switch m {
+	case FullTextAll:
+		return `plainto_tsquery('english', $4)`
+	case FullTextAny:
+		return `to_tsquery('english', replace(plainto_tsquery('english', $4)::text, ' & ', ' | '))`
+	case FullTextOff:
+		// Always NULL, so nothing matches and only the vector half contributes.
+		// Phrased via the parameter rather than a bare NULL::tsquery so Postgres
+		// can still infer $4's type — it appears nowhere else in the query.
+		return `NULLIF(plainto_tsquery('english', $4), plainto_tsquery('english', $4))`
+	default:
+		return `websearch_to_tsquery('english', $4)`
+	}
+}
+
+// TsqueryExpr exposes tsqueryExpr to the storage layer.
+func (m FullTextMode) TsqueryExpr() string { return m.tsqueryExpr() }
+
 // ScoringConfig controls the hybrid relevance scoring weights.
 // Retrieval uses Reciprocal Rank Fusion (RRF) over vector + full-text candidates,
 // then adds metadata boosts for importance, recency, and access frequency.
 type ScoringConfig struct {
-	RRFConstant         int     // k constant in 1/(k+rank), typically 60
-	CandidateK          int     // how many candidates to fetch from each source
-	ImportanceWeight    float64 // additive boost for importance (0-1 normalized)
-	RecencyWeight       float64 // additive boost for recency decay
-	AccessWeight        float64 // additive boost for access frequency
+	RRFConstant         int          // k constant in 1/(k+rank), typically 60
+	CandidateK          int          // how many candidates to fetch from each source
+	FullText            FullTextMode // how the lexical half builds its tsquery
+	FullTextWeight      float64      // relative weight of the full-text half in the fusion
+	ImportanceWeight    float64      // additive boost for importance (0-1 normalized)
+	RecencyWeight       float64      // additive boost for recency decay
+	AccessWeight        float64      // additive boost for access frequency
 	RecencyHalfLifeDays float64
 }
 
+// DefaultScoringConfig holds the retrieval settings, tuned with cmd/rankeval
+// against a copy of a real knowledge base (153 labelled queries).
+//
+// RRFConstant is 10 rather than the 60 from the original RRF paper. That 60 is
+// calibrated for fusing many systems over large TREC corpora; here it made the
+// fusion so flat that rank 1 scored barely more than rank 50 (1/61 vs 1/110),
+// and the metadata boosts below — up to 0.013 combined — swamped RRF terms
+// that topped out near 0.033. They were steering the ranking, not breaking
+// ties. Sharpening k restores the intended balance: MRR 0.471 -> 0.664 and
+// R@1 0.268 -> 0.542, and zeroing the boosts entirely now changes nothing.
+//
+// FullTextAny looks wrong at first glance — ORing every term matches a large
+// slice of the corpus — but measurement disagrees: it beats requiring all
+// terms and beats pure vector search by a wide margin. Natural questions
+// rarely share every term with the memory that answers them, so AND semantics
+// leave the lexical half silent and throw its contribution away.
+//
+// Re-measure with cmd/rankeval before changing any of this.
 var DefaultScoringConfig = ScoringConfig{
-	RRFConstant:         60,
+	RRFConstant:         10,
 	CandidateK:          100,
+	FullText:            FullTextAny,
+	FullTextWeight:      1.0,
 	ImportanceWeight:    0.005,
 	RecencyWeight:       0.005,
 	AccessWeight:        0.003,

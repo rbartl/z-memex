@@ -38,7 +38,13 @@ score = 1/(k + vector_rank) + 1/(k + fulltext_rank)
       + access_weight    * min(1, ln(1 + access_count) / ln(21))
 ```
 
-Default weights are intentionally small (`0.005`, `0.005`, `0.003`) so RRF dominates and metadata acts as a tiebreaker. The recency decay half-life is 90 days.
+The metadata weights are intentionally small (`0.005`, `0.005`, `0.003`) so RRF dominates and metadata only breaks ties. The recency decay half-life is 90 days.
+
+Whether that holds depends entirely on `k`. RRF's classic `k = 60` is calibrated for fusing many systems over large TREC corpora; at this scale it flattened the fusion so far that the top four results for a query differed by `0.002` total, while the metadata boosts contribute up to `0.013` — six times the entire relevance spread. Ranking was decided by importance and recency rather than by relevance. `k = 10` restores the intended balance, and zeroing the boosts entirely now changes nothing measurable.
+
+The lexical half ORs its terms rather than requiring all of them. That matches a large share of the corpus and looks careless, but natural questions rarely share every term with the memory that answers them, so requiring all terms leaves full-text silent and discards its contribution.
+
+Both choices are measured, not assumed — see [Tuning retrieval](#tuning-retrieval).
 
 Vector search uses an **HNSW** index. Because an HNSW scan returns at most `hnsw.ef_search` rows, the server raises that per connection to match the candidate pool the hybrid query requests — otherwise the vector half of the ranking would be silently starved.
 
@@ -163,6 +169,28 @@ npm install && npm run build   # re-vendor browser assets into web/static/vendor
 ```
 
 The server resolves `migrations/` and `web/` relative to the working directory, so run it from the repository root.
+
+### Tuning retrieval
+
+`cmd/rankeval` measures retrieval quality so ranking changes can be compared instead of eyeballed. It runs a labelled set of questions through each scoring variant and reports MRR and recall at several cutoffs.
+
+Point it at a **copy** of your data, never the live database — evaluation issues hundreds of queries, and `RecordAccess` would skew the very access-count boost being measured.
+
+```bash
+# clone production into a throwaway instance
+docker run -d --rm --name memex-eval -e POSTGRES_USER=memex -e POSTGRES_PASSWORD=memex \
+  -e POSTGRES_DB=memex -p 55432:5432 pgvector/pgvector:pg16
+docker exec memex-postgres-1 pg_dump -U memex -d memex --no-owner \
+  | docker exec -i memex-eval psql -U memex -d memex
+
+go run ./cmd/rankeval -generate -out eval.json   # label a question per memory
+go run ./cmd/rankeval -set eval.json             # compare tsquery modes
+go run ./cmd/rankeval -set eval.json -sweep      # sweep the fusion balance
+```
+
+`-generate` asks a local model to write the question each memory answers. Those questions echo the wording of their source and so flatter lexical matching, which is why the report also breaks results down by origin: add hand-written cases (`{"query": "...", "match": "distinctive substring", "origin": "handwritten"}`) and trust those more. `match` resolves to a memory ID at load time and must hit exactly one memory, so a set survives re-cloning the database.
+
+The generated file contains real memory text and is gitignored.
 
 ## Migrating to Qdrant Later
 

@@ -2,3 +2,4 @@
 .envrc
 node_modules
 .playwright-mcp
+eval.json

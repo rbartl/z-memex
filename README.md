@@ -32,11 +32,13 @@ Three-tier dedup prevents redundant memories without losing information:
 Recall uses **Reciprocal Rank Fusion (RRF)** over two retrieval paths — pgvector cosine similarity and PostgreSQL full-text search — with small additive metadata boosts:
 
 ```
-score = 1/(k + vector_rank) + 1/(k + fulltext_rank)
+score = 1/(k + vector_rank) + fulltext_weight / (k + fulltext_rank)
       + importance_weight * (importance - 1) / 4
       + recency_weight   * exp(-λ * age_in_days)
       + access_weight    * min(1, ln(1 + access_count) / ln(21))
 ```
+
+`fulltext_weight` defaults to `1.0` — the sweep found no reliable gain from moving it, but it is there to be re-measured.
 
 The metadata weights are intentionally small (`0.005`, `0.005`, `0.003`) so RRF dominates and metadata only breaks ties. The recency decay half-life is 90 days.
 
@@ -150,6 +152,10 @@ Available at `http://localhost:3000/ui` (basic auth, credentials from `UI_USER` 
 - **Memories** — browse and search with semantic search, or open a memory for detail (importance, access count, last accessed, related memories grouped by shared entity)
 - **Graph** — explore the interactive knowledge graph (D3.js), filtered by entity
 - **Chat** — RAG chat against your knowledge base, streaming token-by-token with the retrieved memories cited as sources. Models that emit reasoning tokens show their thinking separately.
+
+Each chat turn first asks the model to rewrite your question into a search query, so follow-ups resolve pronouns against the earlier conversation ("what does *he* work on?"). That rewrite is only ever an optimization: if the model returns nothing usable, your own words are used instead, and retrieval always runs. It used to be able to answer "no lookup needed" and skip retrieval altogether, which meant one uncooperative response silently hid the entire knowledge base from the model.
+
+Note the rewrite can work against the lexical half of the search by trading your specific wording for generic terms. Sources retrieved in earlier turns are carried forward and merged, capped at the highest-scoring 12.
 - **Setup** — client connection instructions
 
 ## Security

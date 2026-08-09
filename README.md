@@ -176,6 +176,24 @@ npm install && npm run build   # re-vendor browser assets into web/static/vendor
 
 The server resolves `migrations/` and `web/` relative to the working directory, so run it from the repository root.
 
+### Continuous integration
+
+`.gitlab-ci.yml` runs on every branch and merge request:
+
+| Job | What it protects |
+|---|---|
+| `format` | `gofmt` cleanliness |
+| `lint` | `golangci-lint run`, plus `config verify` — an unknown key makes `run` skip a setting silently rather than fail |
+| `vulncheck` | `govulncheck`, non-blocking: advisories usually land against the Go image rather than this code |
+| `assets` | `web/static/vendor` still matches `package-lock.json`, which has silently drifted before |
+| `test` | `go test -race` with coverage |
+| `smoke` | Migrations apply to a real pgvector database, templates parse, and the HTTP surface comes up behind its auth |
+| `container` | The image still builds |
+
+`smoke` is the one that catches what unit tests cannot — it boots the actual binary against a Postgres service and checks `/health`, the UI (rendered, and rejecting anonymous requests), and an MCP `tools/list`. No Ollama is needed, because the server only contacts it lazily.
+
+`container` needs a Docker-capable runner; GitLab.com's shared runners qualify. It builds and discards — nothing is published.
+
 ### Tuning retrieval
 
 `cmd/rankeval` measures retrieval quality so ranking changes can be compared instead of eyeballed. It runs a labelled set of questions through each scoring variant and reports MRR and recall at several cutoffs.

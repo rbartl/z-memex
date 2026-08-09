@@ -1,0 +1,180 @@
+# CI for memex.
+#
+# Fast feedback first (formatting, lint, vulnerabilities, asset drift), then
+# tests, then the artefacts that take longest to produce. Nothing here deploys
+# or publishes: the container job proves the image still builds and throws it
+# away.
+
+stages:
+  - check
+  - test
+  - build
+
+variables:
+  # Use the toolchain in the image rather than silently downloading whichever
+  # one go.mod asks for — CI should fail loudly if the two drift apart.
+  GOTOOLCHAIN: local
+  GIT_DEPTH: "20"
+
+# Build branch pipelines, and merge request pipelines, but never both at once
+# for the same commit.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+default:
+  # 1.26 tracks the latest patch release, so security fixes to the standard
+  # library arrive without a config change. It matches the Dockerfile's builder.
+  image: golang:1.26
+  before_script:
+    # GitLab can only cache paths inside the project directory.
+    - export GOMODCACHE="$CI_PROJECT_DIR/.cache/go-mod"
+    - export GOCACHE="$CI_PROJECT_DIR/.cache/go-build"
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .cache/go-mod
+      - .cache/go-build
+
+format:
+  stage: check
+  script:
+    - |
+      unformatted="$(gofmt -l cmd internal web)"
+      if [ -n "$unformatted" ]; then
+        echo "These files need gofmt:"
+        echo "$unformatted"
+        exit 1
+      fi
+
+lint:
+  stage: check
+  image: golangci/golangci-lint:v2.12.2
+  script:
+    # Verify the config separately: an unknown key makes `run` silently skip
+    # the setting rather than fail, which is how check-type-assertions sat
+    # inactive for months.
+    - golangci-lint config verify
+    - golangci-lint run ./...
+
+vulncheck:
+  stage: check
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - "$(go env GOPATH)/bin/govulncheck ./..."
+  # Advisories land against whatever Go patch the image currently ships, and
+  # are usually fixed by a new image rather than by this repository. Report
+  # them without blocking merges.
+  allow_failure: true
+
+# The browser libraries under web/static/vendor are copies produced by
+# `npm run build`. They have drifted behind package-lock.json before (alpine
+# 3.15.8 vendored against 3.15.12 locked), which is invisible until something
+# breaks in a browser.
+assets:
+  stage: check
+  image: node:22
+  before_script:
+    - npm config set cache "$CI_PROJECT_DIR/.npm"
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm
+  script:
+    - npm ci --no-audit --no-fund
+    - npm run build
+    - |
+      if ! git diff --quiet -- web/static/vendor; then
+        echo "Vendored assets do not match package-lock.json."
+        echo "Run 'npm ci && npm run build' and commit the result."
+        git diff --stat -- web/static/vendor
+        exit 1
+      fi
+
+test:
+  stage: test
+  script:
+    # -race needs atomic counters to record coverage correctly.
+    - go test -race -covermode=atomic -coverprofile=coverage.out ./...
+    - go tool cover -func=coverage.out | tail -1
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - coverage.out
+
+# Exercises what unit tests cannot: that the migrations apply to a real
+# pgvector database, that the templates parse, and that the HTTP surface comes
+# up behind its auth. The server contacts Ollama lazily, so none is needed.
+smoke:
+  stage: test
+  services:
+    - name: pgvector/pgvector:pg16
+      alias: postgres
+  variables:
+    POSTGRES_USER: memex
+    POSTGRES_PASSWORD: memex
+    POSTGRES_DB: memex
+    POSTGRES_URL: "postgres://memex:memex@postgres:5432/memex?sslmode=disable"
+    OLLAMA_URL: "http://127.0.0.1:11434"
+    MCP_AUTH_TOKEN: ci-token
+    UI_USER: ci
+    UI_PASS: ci-password
+  script:
+    - go build -o memex ./cmd/server
+    - |
+      echo "waiting for postgres..."
+      for _ in $(seq 1 30); do
+        (echo > /dev/tcp/postgres/5432) >/dev/null 2>&1 && break
+        sleep 1
+      done
+    # Migrations run on startup, so a broken one fails the boot below.
+    - ./memex > server.log 2>&1 &
+    - echo $! > server.pid
+    - |
+      echo "waiting for memex..."
+      for _ in $(seq 1 30); do
+        curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
+        sleep 1
+      done
+    - curl -sf http://127.0.0.1:3000/health | grep -q '"status":"ok"'
+    # Renders every page template through the real handler.
+    - curl -sf -u "$UI_USER:$UI_PASS" -o /dev/null http://127.0.0.1:3000/ui
+    # ... and the UI is not reachable without credentials.
+    - test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/ui)" = "401"
+    # The MCP surface answers, and only with a valid token.
+    - |
+      curl -sf -X POST http://127.0.0.1:3000/mcp \
+        -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -q store_memory
+    - test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3000/mcp -d '{}')" = "401"
+    - kill "$(cat server.pid)"
+  after_script:
+    - echo "--- server log ---"; tail -50 server.log || true
+  artifacts:
+    when: on_failure
+    expire_in: 1 week
+    paths:
+      - server.log
+
+# Proves the image still builds. Requires a Docker-capable runner; GitLab.com's
+# shared runners qualify.
+container:
+  stage: build
+  image: docker:29-cli
+  services:
+    - docker:29-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script: []
+  cache: []
+  script:
+    - docker build -t "memex:$CI_COMMIT_SHORT_SHA" .

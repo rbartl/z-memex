@@ -74,10 +74,10 @@ func (o *Ollama) generate(ctx context.Context, prompt string) (*ollamaGenerateRe
 	return &result, nil
 }
 
-func (o *Ollama) Extract(ctx context.Context, content string, knownTypes []string) (*memory.ExtractionResult, error) {
+func (o *Ollama) Extract(ctx context.Context, content string) (*memory.ExtractionResult, error) {
 	slog.Info("ollama extract starting", "model", o.model, "content_len", len(content))
 
-	resp, err := o.generate(ctx, buildExtractionPrompt(knownTypes)+content)
+	resp, err := o.generate(ctx, buildExtractionPrompt()+content)
 	if err != nil {
 		return nil, fmt.Errorf("ollama extraction: %w", err)
 	}
@@ -140,10 +140,10 @@ func (o *Ollama) MergeMemories(ctx context.Context, existing, incoming string) (
 	return result.Merged, nil
 }
 
-func (o *Ollama) ExtractCrossRelations(ctx context.Context, contentA, contentB string, knownTypes []string) ([]memory.ExtractedRelation, error) {
+func (o *Ollama) ExtractCrossRelations(ctx context.Context, contentA, contentB string) ([]memory.ExtractedRelation, error) {
 	slog.Info("ollama cross-relation starting", "model", o.model, "content_a_len", len(contentA), "content_b_len", len(contentB))
 
-	prompt := buildCrossRelationPrompt(knownTypes, contentA, contentB)
+	prompt := buildCrossRelationPrompt(contentA, contentB)
 
 	resp, err := o.generate(ctx, prompt)
 	if err != nil {

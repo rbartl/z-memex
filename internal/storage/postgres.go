@@ -268,13 +268,21 @@ func (p *Postgres) RecordAccess(ctx context.Context, ids []uuid.UUID) error {
 // --- Graph / Entity operations ---
 
 func (p *Postgres) UpsertEntity(ctx context.Context, name, entityType string) (uuid.UUID, error) {
+	norm := memory.NormalizeName(name)
+	if norm == "" {
+		return uuid.Nil, fmt.Errorf("entity name is empty")
+	}
+
+	// Identity is the normalised name; the first spelling seen stays as the
+	// display name, so a later "ACME" resolves to the existing node rather
+	// than renaming it.
 	var id uuid.UUID
 	err := p.pool.QueryRow(ctx, `
-		INSERT INTO entities (name, entity_type)
-		VALUES ($1, $2)
-		ON CONFLICT (name) DO UPDATE SET entity_type = EXCLUDED.entity_type
+		INSERT INTO entities (name, name_norm, entity_type)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (name_norm) DO UPDATE SET entity_type = EXCLUDED.entity_type
 		RETURNING id
-	`, name, entityType).Scan(&id)
+	`, name, norm, entityType).Scan(&id)
 	return id, err
 }
 
@@ -480,23 +488,6 @@ func (p *Postgres) GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) 
 		memories = append(memories, m)
 	}
 	return memories, nil
-}
-
-func (p *Postgres) GetEntityTypes(ctx context.Context) ([]string, error) {
-	rows, err := p.pool.Query(ctx, `SELECT DISTINCT entity_type FROM entities WHERE entity_type != '' ORDER BY entity_type`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var types []string
-	for rows.Next() {
-		var t string
-		if err := rows.Scan(&t); err != nil {
-			return nil, err
-		}
-		types = append(types, t)
-	}
-	return types, nil
 }
 
 func (p *Postgres) GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]memory.RelatedMemory, error) {

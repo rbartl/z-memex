@@ -21,8 +21,8 @@ func NewAnthropic(apiKey string) *Anthropic {
 	return &Anthropic{client: &client}
 }
 
-func buildExtractionPrompt(knownTypes []string) string {
-	typeList := strings.Join(knownTypes, ", ")
+func buildExtractionPrompt() string {
+	typeList := strings.Join(memory.EntityTypes, ", ")
 	return `You are a knowledge graph extractor and summarizer. Given a piece of text, do two things:
 
 1. Write a one-sentence summary that captures the key fact or decision.
@@ -43,22 +43,24 @@ Return ONLY a JSON object with this shape:
   ]
 }
 
-Known entity types (reuse these when they fit): ` + typeList + `
-
 Rules:
 - The summary should be self-contained and useful without the original text
 - Only extract meaningful, non-trivial relations
-- Entity names should be normalized (e.g. "TypeScript" not "typescript")
-- For entity types: reuse a known type if it fits. If none fit, invent a short lowercase singular noun (e.g. "metric", "role", "event") — do NOT use "other"
+- Extract an entity ONLY if it is a specific named thing: a person, an organisation, a team, a project, a product, a named technology or tool, a document, an event, or a place. A useful test: would this same entity plausibly appear in a different, unrelated note? "PostgreSQL" and "Acme Corp" pass. "reduced overhead", "the attached spreadsheet", "improved workflow" do not.
+- Do NOT extract abstract noun phrases, descriptions, quantities, states, or wording lifted from this text just because it appears. Half the entities in a knowledge base connect nothing if this rule is ignored.
+- Prefer the shortest name that still identifies the thing ("Gemini Vision", not "the Gemini Vision capability")
+- Entity types MUST be one of: ` + typeList + `
+- If no listed type fits, use "concept". Never invent a type.
 - Use an empty array for relations if no meaningful relations found
+- Fewer, better entities beat more. An empty array is a valid answer.
 - No explanation, no markdown, only the JSON object
 
 Text to analyze:
 `
 }
 
-func buildCrossRelationPrompt(knownTypes []string, contentA, contentB string) string {
-	typeList := strings.Join(knownTypes, ", ")
+func buildCrossRelationPrompt(contentA, contentB string) string {
+	typeList := strings.Join(memory.EntityTypes, ", ")
 	return `You are a knowledge graph extractor. You are given two separate pieces of knowledge from a personal knowledge base. Identify relationships that connect entities ACROSS these two texts.
 
 Return ONLY a JSON array of relations. Each relation has this shape:
@@ -71,13 +73,15 @@ Return ONLY a JSON array of relations. Each relation has this shape:
   "confidence": 0.0 to 1.0
 }
 
-Known entity types (reuse these when they fit): ` + typeList + `
-
 Rules:
 - Only extract relationships that CONNECT the two texts (not relations within a single text)
-- Entity names should be normalized (e.g. "TypeScript" not "typescript")
-- For entity types: reuse a known type if it fits. If none fit, invent a short lowercase singular noun (e.g. "metric", "role", "event") — do NOT use "other"
+- Extract an entity ONLY if it is a specific named thing: a person, an organisation, a team, a project, a product, a named technology or tool, a document, an event, or a place. A useful test: would this same entity plausibly appear in a different, unrelated note? "PostgreSQL" and "Acme Corp" pass. "reduced overhead", "the attached spreadsheet", "improved workflow" do not.
+- Do NOT extract abstract noun phrases, descriptions, quantities, states, or wording lifted from this text just because it appears. Half the entities in a knowledge base connect nothing if this rule is ignored.
+- Prefer the shortest name that still identifies the thing ("Gemini Vision", not "the Gemini Vision capability")
+- Entity types MUST be one of: ` + typeList + `
+- If no listed type fits, use "concept". Never invent a type.
 - Return [] if no meaningful cross-text relations found
+- Fewer, better entities beat more. [] is a valid answer.
 - No explanation, no markdown, only the JSON array
 
 Text A:
@@ -88,8 +92,8 @@ Text B:
 `
 }
 
-func (a *Anthropic) Extract(ctx context.Context, content string, knownTypes []string) (*memory.ExtractionResult, error) {
-	prompt := buildExtractionPrompt(knownTypes) + content
+func (a *Anthropic) Extract(ctx context.Context, content string) (*memory.ExtractionResult, error) {
+	prompt := buildExtractionPrompt() + content
 	msg, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaudeHaiku4_5, // cheap + fast
 		MaxTokens: 1024,
@@ -156,8 +160,8 @@ func (a *Anthropic) MergeMemories(ctx context.Context, existing, incoming string
 	return strings.TrimSpace(msg.Content[0].Text), nil
 }
 
-func (a *Anthropic) ExtractCrossRelations(ctx context.Context, contentA, contentB string, knownTypes []string) ([]memory.ExtractedRelation, error) {
-	prompt := buildCrossRelationPrompt(knownTypes, contentA, contentB)
+func (a *Anthropic) ExtractCrossRelations(ctx context.Context, contentA, contentB string) ([]memory.ExtractedRelation, error) {
+	prompt := buildCrossRelationPrompt(contentA, contentB)
 
 	msg, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaudeHaiku4_5,

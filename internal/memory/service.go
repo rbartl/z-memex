@@ -19,8 +19,8 @@ type Embedder interface {
 }
 
 type Extractor interface {
-	Extract(ctx context.Context, content string, knownTypes []string) (*ExtractionResult, error)
-	ExtractCrossRelations(ctx context.Context, contentA, contentB string, knownTypes []string) ([]ExtractedRelation, error)
+	Extract(ctx context.Context, content string) (*ExtractionResult, error)
+	ExtractCrossRelations(ctx context.Context, contentA, contentB string) ([]ExtractedRelation, error)
 	MergeMemories(ctx context.Context, existing, incoming string) (string, error)
 }
 
@@ -43,7 +43,6 @@ type Store interface {
 	UpdateSummary(ctx context.Context, id uuid.UUID, summary string) error
 	GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*Memory, error)
 	GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]RelatedMemory, error)
-	GetEntityTypes(ctx context.Context) ([]string, error)
 }
 
 type Service struct {
@@ -79,6 +78,10 @@ func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID st
 	if importance < 1 || importance > 5 {
 		importance = 3
 	}
+
+	// Tags are free text chosen by whichever client is storing, so the same tag
+	// arrives in several spellings. Fold them here rather than at each call site.
+	tags = NormalizeTags(tags)
 
 	hash := hashContent(content)
 
@@ -202,11 +205,7 @@ func (s *Service) asyncExtractAndConnect(m *Memory, vec []float32) {
 }
 
 func (s *Service) extractAndGraph(ctx context.Context, m *Memory) error {
-	knownTypes, err := s.store.GetEntityTypes(ctx)
-	if err != nil {
-		slog.Warn("failed to fetch entity types, using empty list", "err", err)
-	}
-	result, err := s.extract.Extract(ctx, m.Content, knownTypes)
+	result, err := s.extract.Extract(ctx, m.Content)
 	if err != nil {
 		return err
 	}
@@ -221,16 +220,13 @@ func (s *Service) extractAndGraph(ctx context.Context, m *Memory) error {
 	}
 
 	for _, r := range result.Relations {
-		if !validEntityType(r.FromType) || !validEntityType(r.ToType) {
-			slog.Warn("skipping relation with invalid entity type", "from", r.FromEntity, "from_type", r.FromType, "to", r.ToEntity, "to_type", r.ToType)
-			continue
-		}
-		fromID, err := s.store.UpsertEntity(ctx, r.FromEntity, r.FromType)
+		fromType, toType := canonicalPair(r)
+		fromID, err := s.store.UpsertEntity(ctx, r.FromEntity, fromType)
 		if err != nil {
 			slog.Warn("upsert entity failed", "entity", r.FromEntity, "err", err)
 			continue
 		}
-		toID, err := s.store.UpsertEntity(ctx, r.ToEntity, r.ToType)
+		toID, err := s.store.UpsertEntity(ctx, r.ToEntity, toType)
 		if err != nil {
 			slog.Warn("upsert entity failed", "entity", r.ToEntity, "err", err)
 			continue
@@ -257,36 +253,26 @@ func (s *Service) crossConnect(ctx context.Context, m *Memory, vec []float32) {
 		return
 	}
 
-	// Fetch the taxonomy once — it is the same for every neighbour, and
-	// querying it inside the loop cost a round trip per comparison.
-	knownTypes, err := s.store.GetEntityTypes(ctx)
-	if err != nil {
-		slog.Warn("failed to fetch entity types for cross-connect", "err", err)
-	}
-
 	var connected int
 	for _, n := range neighbors {
 		if n.Memory.ID == m.ID {
 			continue
 		}
 
-		relations, err := s.extract.ExtractCrossRelations(ctx, m.Content, n.Memory.Content, knownTypes)
+		relations, err := s.extract.ExtractCrossRelations(ctx, m.Content, n.Memory.Content)
 		if err != nil {
 			slog.Warn("cross-relation extraction failed", "memory_id", m.ID, "neighbor_id", n.Memory.ID, "err", err)
 			continue
 		}
 
 		for _, r := range relations {
-			if !validEntityType(r.FromType) || !validEntityType(r.ToType) {
-				slog.Warn("skipping cross-relation with invalid entity type", "from", r.FromEntity, "from_type", r.FromType, "to", r.ToEntity, "to_type", r.ToType)
-				continue
-			}
-			fromID, err := s.store.UpsertEntity(ctx, r.FromEntity, r.FromType)
+			fromType, toType := canonicalPair(r)
+			fromID, err := s.store.UpsertEntity(ctx, r.FromEntity, fromType)
 			if err != nil {
 				slog.Warn("upsert entity failed", "entity", r.FromEntity, "err", err)
 				continue
 			}
-			toID, err := s.store.UpsertEntity(ctx, r.ToEntity, r.ToType)
+			toID, err := s.store.UpsertEntity(ctx, r.ToEntity, toType)
 			if err != nil {
 				slog.Warn("upsert entity failed", "entity", r.ToEntity, "err", err)
 				continue
@@ -435,20 +421,19 @@ func (s *Service) GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([
 
 // validEntityType checks structural sanity only — the LLM owns the taxonomy.
 // Rejects empty, "other", overly long strings, or types containing spaces/special chars.
-func validEntityType(t string) bool {
-	t = strings.ToLower(strings.TrimSpace(t))
-	if t == "" || t == "other" {
-		return false
+// canonicalPair folds an extracted relation's two entity types onto the closed
+// vocabulary. Types the vocabulary cannot place become FallbackEntityType rather
+// than dropping the relation: an odd type label is a smaller loss than a missing
+// edge, and the warning makes new drift visible.
+func canonicalPair(r ExtractedRelation) (fromType, toType string) {
+	fromType, okFrom := CanonicalEntityType(r.FromType)
+	toType, okTo := CanonicalEntityType(r.ToType)
+	if !okFrom || !okTo {
+		slog.Warn("entity type outside vocabulary, using fallback",
+			"from", r.FromEntity, "from_type", r.FromType, "from_mapped", fromType,
+			"to", r.ToEntity, "to_type", r.ToType, "to_mapped", toType)
 	}
-	if len(t) > 50 {
-		return false
-	}
-	for _, c := range t {
-		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' && c != '-' {
-			return false
-		}
-	}
-	return true
+	return fromType, toType
 }
 
 func (s *Service) GetGraph(ctx context.Context, entity string, depth int) (*Graph, error) {

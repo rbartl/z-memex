@@ -54,6 +54,14 @@ Vector search uses an **HNSW** index. Because an HNSW scan returns at most `hnsw
 
 Every stored memory is automatically analyzed to extract entities and relationships. Cross-memory connections are discovered by comparing semantically similar memories. The graph is explorable via MCP tools and the web UI.
 
+Entity identity is the **normalized** name — lowercased, whitespace-collapsed — not the literal one. Names come from an LLM, which capitalizes the same thing differently between calls, so `Acme` and `ACME` used to become two nodes and split the facts about one organization across both. The first spelling seen is kept for display. Tags are folded the same way, since clients choose them freely. Migration `007` backfills this and merges the duplicates it finds, keeping the variant that carried the most memory links.
+
+Entity types come from a **closed vocabulary** (`memory.EntityTypes`): `person`, `organization`, `team`, `role`, `project`, `product`, `technology`, `tool`, `file`, `event`, `location`, `metric`, `concept`. The prompt used to end with "if none fit, invent a short lowercase singular noun", and validation only checked that a type looked like a slug, so the corpus reached 43 types — a useful core followed by `substance`, `timezone`, `cms`, `alias`. Migration `008` folds the historical values onto the list and adds a CHECK constraint, so adding a type now means writing a migration. A type outside the vocabulary is mapped to `concept` and logged rather than dropping the relation, since a mislabelled edge is a smaller loss than a missing one.
+
+The prompt also now states what qualifies as an entity — a specific named thing that could plausibly appear in an unrelated note — and explicitly rejects the abstract noun phrases ("reduced overhead", "the attached spreadsheet") that made up much of the graph.
+
+What this does **not** fix is the entities already extracted under the old prompt. The type mapping relabels them, but a noun phrase relabelled `concept` is still a noun phrase, and 54% of entities are linked to exactly one memory — they cannot connect anything. Clearing that out means re-extracting existing memories against the new prompt, which is a separate job.
+
 ### Database Migrations
 
 Schema changes are managed by [goose](https://github.com/pressly/goose) and run automatically on server startup. Migration files live in `migrations/`.

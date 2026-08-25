@@ -1,0 +1,835 @@
+{{ define "landing.html" }}
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>memex</title>
+        <link
+            rel="icon"
+            href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%23b48cff'/%3E%3Cg stroke='%237ef0ff' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M16 10V2M16 22v8M10 16H2M22 16h8'/%3E%3C/g%3E%3C/svg%3E"
+        />
+        <style>
+            *,
+            *::before,
+            *::after {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            :root {
+                /* Fluorescence-microscopy palette: indigo void, violet cells,
+                   cyan signals. */
+                --void: #07070c;
+                --ink: #eae6f7;
+                --dim: #7d7a99;
+                --hair: rgba(150, 140, 210, 0.16);
+                --spike: #7ef0ff;
+                --soma: #b48cff;
+
+                --display:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+                    sans-serif;
+                --serif:
+                    ui-serif, "New York", "Iowan Old Style", Palatino, Georgia,
+                    serif;
+                --mono:
+                    ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono",
+                    monospace;
+
+                --gutter: clamp(20px, 4vw, 46px);
+            }
+
+            html,
+            body {
+                height: 100%;
+            }
+
+            /* The nebula is CSS, not canvas: static wash, nothing per frame
+               and no second full-screen buffer to keep in memory. */
+            body {
+                background:
+                    radial-gradient(
+                        90% 70% at 18% 24%,
+                        rgba(88, 64, 180, 0.3),
+                        transparent 60%
+                    ),
+                    radial-gradient(
+                        80% 60% at 84% 62%,
+                        rgba(40, 90, 150, 0.22),
+                        transparent 62%
+                    ),
+                    radial-gradient(
+                        70% 60% at 50% 104%,
+                        rgba(120, 60, 150, 0.24),
+                        transparent 60%
+                    ),
+                    var(--void);
+                color: var(--ink);
+                font-family: var(--display);
+                overflow: hidden;
+                -webkit-font-smoothing: antialiased;
+            }
+
+            #field {
+                position: fixed;
+                inset: 0;
+                width: 100%;
+                height: 100%;
+                display: block;
+                cursor: crosshair;
+            }
+
+            /* Instrument enclosure: hairline inset with corner ticks. */
+            .frame {
+                position: fixed;
+                inset: clamp(10px, 1.6vw, 18px);
+                border: 1px solid var(--hair);
+                pointer-events: none;
+            }
+
+            .frame i {
+                position: absolute;
+                width: 9px;
+                height: 9px;
+                border: 0 solid rgba(180, 140, 255, 0.55);
+            }
+            .frame i:nth-child(1) {
+                top: -1px;
+                left: -1px;
+                border-top-width: 1px;
+                border-left-width: 1px;
+            }
+            .frame i:nth-child(2) {
+                top: -1px;
+                right: -1px;
+                border-top-width: 1px;
+                border-right-width: 1px;
+            }
+            .frame i:nth-child(3) {
+                bottom: -1px;
+                left: -1px;
+                border-bottom-width: 1px;
+                border-left-width: 1px;
+            }
+            .frame i:nth-child(4) {
+                bottom: -1px;
+                right: -1px;
+                border-bottom-width: 1px;
+                border-right-width: 1px;
+            }
+
+            .overlay {
+                position: fixed;
+                inset: 0;
+                display: grid;
+                grid-template-rows: auto 1fr;
+                padding: var(--gutter);
+                pointer-events: none;
+            }
+
+            /* Keeps the wordmark readable when the field lights up behind it. */
+            .overlay::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background: radial-gradient(
+                    120% 85% at 0% 100%,
+                    rgba(7, 7, 12, 0.9) 0%,
+                    rgba(7, 7, 12, 0.6) 34%,
+                    rgba(7, 7, 12, 0) 62%
+                );
+                pointer-events: none;
+            }
+
+            .overlay > * {
+                position: relative;
+            }
+
+            .label {
+                font-family: var(--mono);
+                font-size: 0.66rem;
+                letter-spacing: 0.2em;
+                text-transform: uppercase;
+                color: var(--dim);
+            }
+
+            .topbar {
+                display: flex;
+                align-items: center;
+                gap: 0.9rem;
+            }
+
+            .topbar .live::before {
+                content: "";
+                display: inline-block;
+                width: 5px;
+                height: 5px;
+                margin-right: 0.55em;
+                border-radius: 50%;
+                background: var(--spike);
+                box-shadow: 0 0 8px var(--spike);
+                animation: pulse 2.6s ease-in-out infinite;
+            }
+
+            .topbar hr {
+                flex: 1;
+                height: 0;
+                border: 0;
+                border-top: 1px solid var(--hair);
+            }
+
+            .readout b {
+                font-weight: 400;
+                color: var(--ink);
+                font-variant-numeric: tabular-nums;
+            }
+
+            @keyframes pulse {
+                0%,
+                100% {
+                    opacity: 1;
+                }
+                50% {
+                    opacity: 0.25;
+                }
+            }
+
+            .footbar {
+                align-self: end;
+                display: flex;
+                align-items: flex-end;
+                justify-content: space-between;
+                gap: 1.5rem;
+            }
+
+            .hero {
+                max-width: 40rem;
+            }
+
+            .hero h1 {
+                font-size: clamp(3.6rem, 15vw, 10.5rem);
+                font-weight: 700;
+                letter-spacing: -0.055em;
+                line-height: 0.82;
+                margin-left: -0.055em;
+                background: linear-gradient(
+                    172deg,
+                    #f6f2ff 0%,
+                    #cdc2f5 46%,
+                    #7f74b8 100%
+                );
+                -webkit-background-clip: text;
+                background-clip: text;
+                color: transparent;
+            }
+
+            .hero .lede {
+                font-family: var(--serif);
+                font-size: clamp(1.05rem, 2.1vw, 1.55rem);
+                line-height: 1.35;
+                color: #c9c3e4;
+                max-width: 22ch;
+                margin: clamp(1rem, 2vw, 1.6rem) 0 clamp(1.4rem, 2.6vw, 2.2rem);
+            }
+
+            /* Call to action: a hairline with a signal running down it on
+               hover and focus. */
+            .enter {
+                pointer-events: auto;
+                display: inline-block;
+                position: relative;
+                font-family: var(--mono);
+                font-size: 0.78rem;
+                letter-spacing: 0.16em;
+                text-transform: uppercase;
+                color: var(--ink);
+                text-decoration: none;
+                padding-bottom: 0.6rem;
+            }
+
+            .enter::before {
+                content: "";
+                position: absolute;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                height: 1px;
+                background: rgba(180, 140, 255, 0.4);
+            }
+
+            .enter::after {
+                content: "";
+                position: absolute;
+                left: 0;
+                bottom: 0;
+                width: 34%;
+                height: 1px;
+                background: linear-gradient(
+                    90deg,
+                    transparent,
+                    var(--spike),
+                    transparent
+                );
+                opacity: 0;
+                transform: translateX(-40%);
+            }
+
+            .enter:hover::after,
+            .enter:focus-visible::after {
+                opacity: 1;
+                animation: conduct 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+            }
+
+            .enter:focus-visible {
+                outline: 1px solid var(--spike);
+                outline-offset: 6px;
+            }
+
+            .enter span {
+                display: inline-block;
+                transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+
+            .enter:hover span,
+            .enter:focus-visible span {
+                transform: translateX(5px);
+            }
+
+            @keyframes conduct {
+                from {
+                    transform: translateX(-40%);
+                }
+                to {
+                    transform: translateX(300%);
+                }
+            }
+
+            .hero .note {
+                margin-top: 0.9rem;
+                font-family: var(--mono);
+                font-size: 0.66rem;
+                letter-spacing: 0.14em;
+                color: var(--dim);
+            }
+
+            .hint {
+                flex: none;
+                padding-bottom: 0.35rem;
+                white-space: nowrap;
+                color: rgba(125, 122, 153, 0.75);
+            }
+
+            .on-touch {
+                display: none;
+            }
+
+            @media (pointer: coarse) {
+                .on-pointer {
+                    display: none;
+                }
+                .on-touch {
+                    display: inline;
+                }
+            }
+
+            @media (max-width: 760px) {
+                .hero .lede {
+                    max-width: 26ch;
+                }
+                .footbar {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 1.6rem;
+                }
+                .topbar .readout {
+                    display: none;
+                }
+            }
+
+            @media (prefers-reduced-motion: reduce) {
+                .topbar .live::before,
+                .enter:hover::after,
+                .enter:focus-visible::after {
+                    animation: none;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <canvas id="field" aria-hidden="true"></canvas>
+
+        <div class="frame" aria-hidden="true">
+            <i></i><i></i><i></i><i></i>
+        </div>
+
+        <div class="overlay">
+            <div class="topbar label">
+                <span class="live">neural field</span>
+                <hr />
+                <span class="readout"
+                    ><b id="stat-n">0</b> neurons · <b id="stat-e">0</b>
+                    synapses</span
+                >
+            </div>
+
+            <div class="footbar">
+                <div class="hero">
+                    <h1>memex</h1>
+                    <p class="lede">Memories that keep their connections.</p>
+                    <a class="enter" href="/ui"
+                        >Open memex <span aria-hidden="true">→</span></a
+                    >
+                    <p class="note">Sign in with your UI credentials.</p>
+                </div>
+
+                <div class="label hint">
+                    <span class="on-pointer">click the field to send a signal</span>
+                    <span class="on-touch">tap the field to send a signal</span>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            (function () {
+                "use strict";
+
+                var field = document.getElementById("field");
+                var ctx = field.getContext("2d");
+                var statN = document.getElementById("stat-n");
+                var statE = document.getElementById("stat-e");
+
+                var reduced = window.matchMedia(
+                    "(prefers-reduced-motion: reduce)",
+                ).matches;
+
+                var SPEED = 190; // px/s a signal travels along a connection
+                var SPAWN = 0.5; // s between spontaneous signals
+                var RELAY = 0.55; // chance a signal carries on past a cell
+                var MAX_HOPS = 7;
+                var MAX_SIGNALS = 60; // hard cap: bounded work per frame
+
+                var W = 0,
+                    H = 0,
+                    dpr = 1;
+                var cells = [],
+                    links = [],
+                    signals = [],
+                    rings = [];
+                var pointer = { x: -9999, y: -9999, on: false };
+                var anatomy = document.createElement("canvas");
+                var spriteSoma = sprite("180,140,255");
+                var spriteTip = sprite("126,240,255");
+                var last = 0,
+                    spawnAt = 0,
+                    running = true;
+
+                function rand(a, b) {
+                    return a + Math.random() * (b - a);
+                }
+                function pick(a) {
+                    return a[(Math.random() * a.length) | 0];
+                }
+
+                // A single pre-rendered glow per color, stamped with drawImage.
+                // Far cheaper than building gradients or shadow blurs per frame.
+                function sprite(rgb) {
+                    var c = document.createElement("canvas");
+                    c.width = c.height = 96;
+                    var g = c.getContext("2d");
+                    var grad = g.createRadialGradient(48, 48, 0, 48, 48, 48);
+                    grad.addColorStop(0, "rgba(" + rgb + ",1)");
+                    grad.addColorStop(0.16, "rgba(" + rgb + ",0.4)");
+                    grad.addColorStop(0.55, "rgba(" + rgb + ",0.11)");
+                    grad.addColorStop(1, "rgba(" + rgb + ",0)");
+                    g.fillStyle = grad;
+                    g.fillRect(0, 0, 96, 96);
+                    return c;
+                }
+
+                function build() {
+                    var count = Math.round(
+                        Math.max(14, Math.min(40, (W * H) / 34000)),
+                    );
+
+                    // Best-candidate sampling: even coverage without the
+                    // visible regularity of a grid.
+                    cells = [];
+                    var pad = Math.min(W, H) * 0.08;
+                    for (var i = 0; i < count; i++) {
+                        var best = null,
+                            bestD = -1;
+                        for (var t = 0; t < (i ? 10 : 1); t++) {
+                            var c = { x: rand(pad, W - pad), y: rand(pad, H - pad) };
+                            var d = Infinity;
+                            for (var k = 0; k < cells.length; k++) {
+                                var dx = cells[k].x - c.x,
+                                    dy = cells[k].y - c.y;
+                                d = Math.min(d, dx * dx + dy * dy);
+                            }
+                            if (d > bestD) {
+                                bestD = d;
+                                best = c;
+                            }
+                        }
+                        best.r = rand(2.2, 4.2);
+                        best.glow = Math.random() * 0.3;
+                        best.phase = Math.random() * Math.PI * 2;
+                        best.links = [];
+                        best.stubs = [];
+                        var n = 4 + ((Math.random() * 4) | 0);
+                        var off = Math.random() * Math.PI * 2;
+                        for (var s = 0; s < n; s++) {
+                            best.stubs.push({
+                                a: off + (s / n) * Math.PI * 2 + rand(-0.35, 0.35),
+                                len: rand(14, 40),
+                                bend: rand(-0.5, 0.5),
+                            });
+                        }
+                        cells.push(best);
+                    }
+
+                    // Connect each cell to its 2-3 nearest neighbours.
+                    var reach = Math.max(150, Math.min(W, H) * 0.34);
+                    var seen = {};
+                    links = [];
+                    cells.forEach(function (a, ai) {
+                        var near = cells
+                            .map(function (b, bi) {
+                                return { b: b, bi: bi, d: Math.hypot(b.x - a.x, b.y - a.y) };
+                            })
+                            .filter(function (o) {
+                                return o.b !== a && o.d < reach;
+                            })
+                            .sort(function (p, q) {
+                                return p.d - q.d;
+                            });
+
+                        var want = 2 + ((Math.random() * 2) | 0);
+                        for (var k = 0; k < near.length && want > 0; k++) {
+                            var key = Math.min(ai, near[k].bi) + ":" + Math.max(ai, near[k].bi);
+                            if (seen[key]) continue;
+                            seen[key] = 1;
+                            want--;
+
+                            var b = near[k].b;
+                            var bend = rand(-0.15, 0.15);
+                            var link = {
+                                a: a,
+                                b: b,
+                                cx: (a.x + b.x) / 2 - (b.y - a.y) * bend,
+                                cy: (a.y + b.y) / 2 + (b.x - a.x) * bend,
+                                len: near[k].d,
+                                heat: 0,
+                            };
+                            links.push(link);
+                            a.links.push(link);
+                            b.links.push(link);
+                        }
+                    });
+
+                    signals = [];
+                    rings = [];
+                    statN.textContent = cells.length;
+                    statE.textContent = links.length;
+                    paintAnatomy();
+                }
+
+                // Cells and their resting connections never move, so they are
+                // drawn once into one offscreen buffer and blitted per frame.
+                function paintAnatomy() {
+                    anatomy.width = Math.max(1, Math.round(W * dpr));
+                    anatomy.height = Math.max(1, Math.round(H * dpr));
+                    var c = anatomy.getContext("2d");
+                    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    c.lineCap = "round";
+
+                    c.strokeStyle = "rgba(150,136,220,0.13)";
+                    c.lineWidth = 0.75;
+                    links.forEach(function (l) {
+                        c.beginPath();
+                        c.moveTo(l.a.x, l.a.y);
+                        c.quadraticCurveTo(l.cx, l.cy, l.b.x, l.b.y);
+                        c.stroke();
+                    });
+
+                    // Dendrites taper: a few segments of shrinking width.
+                    cells.forEach(function (n) {
+                        n.stubs.forEach(function (st) {
+                            var tx = n.x + Math.cos(st.a) * st.len,
+                                ty = n.y + Math.sin(st.a) * st.len,
+                                qx = n.x + Math.cos(st.a + st.bend) * st.len * 0.62,
+                                qy = n.y + Math.sin(st.a + st.bend) * st.len * 0.62,
+                                px = n.x,
+                                py = n.y;
+                            for (var i = 1; i <= 5; i++) {
+                                var t = i / 5,
+                                    u = 1 - t;
+                                var x = u * u * n.x + 2 * u * t * qx + t * t * tx;
+                                var y = u * u * n.y + 2 * u * t * qy + t * t * ty;
+                                c.beginPath();
+                                c.moveTo(px, py);
+                                c.lineTo(x, y);
+                                c.lineWidth = 1.5 - t * 1.15;
+                                c.strokeStyle =
+                                    "rgba(176,158,242," +
+                                    (0.4 - t * 0.24).toFixed(3) +
+                                    ")";
+                                c.stroke();
+                                px = x;
+                                py = y;
+                            }
+                        });
+                    });
+                }
+
+                function resize() {
+                    // A tab that is still hidden defers layout, so the canvas
+                    // can measure zero here. Keep asking until it doesn't.
+                    W = field.clientWidth;
+                    H = field.clientHeight;
+                    if (W < 2 || H < 2) {
+                        setTimeout(resize, 300);
+                        return;
+                    }
+
+                    dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+                    field.width = Math.round(W * dpr);
+                    field.height = Math.round(H * dpr);
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+                    build();
+                    if (reduced) still();
+                }
+
+                function at(l, t) {
+                    var u = 1 - t;
+                    return {
+                        x: u * u * l.a.x + 2 * u * t * l.cx + t * t * l.b.x,
+                        y: u * u * l.a.y + 2 * u * t * l.cy + t * t * l.b.y,
+                    };
+                }
+
+                function send(cell, hops) {
+                    for (var i = 0; i < cell.links.length; i++) {
+                        if (signals.length >= MAX_SIGNALS) return;
+                        var l = cell.links[i];
+                        signals.push({
+                            l: l,
+                            fwd: l.a === cell,
+                            t: 0,
+                            speed: SPEED / Math.max(l.len, 40),
+                            hops: hops,
+                        });
+                    }
+                    cell.glow = 1;
+                }
+
+                function step(dt, now) {
+                    if (now - spawnAt > SPAWN && cells.length) {
+                        spawnAt = now;
+                        send(pick(cells), 0);
+                    }
+
+                    for (var i = 0; i < cells.length; i++) {
+                        var c = cells[i];
+                        c.glow *= Math.exp(-dt / 0.42);
+                        if (pointer.on) {
+                            var d = Math.hypot(c.x - pointer.x, c.y - pointer.y);
+                            if (d < 170) {
+                                var f = 1 - d / 170;
+                                c.glow = Math.max(c.glow, f * f);
+                                if (Math.random() < dt * f * 1.4) send(c, MAX_HOPS - 2);
+                            }
+                        }
+                    }
+
+                    for (var s = signals.length - 1; s >= 0; s--) {
+                        var sig = signals[s];
+                        sig.t += sig.speed * dt;
+                        sig.l.heat = Math.min(1, sig.l.heat + dt * 2.2);
+                        if (sig.t >= 1) {
+                            var target = sig.fwd ? sig.l.b : sig.l.a;
+                            target.glow = 1;
+                            signals.splice(s, 1);
+                            if (sig.hops < MAX_HOPS && Math.random() < RELAY) {
+                                var next = pick(target.links);
+                                if (next !== sig.l && signals.length < MAX_SIGNALS) {
+                                    signals.push({
+                                        l: next,
+                                        fwd: next.a === target,
+                                        t: 0,
+                                        speed: SPEED / Math.max(next.len, 40),
+                                        hops: sig.hops + 1,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    for (var k = 0; k < links.length; k++) {
+                        links[k].heat *= Math.exp(-dt / 0.5);
+                    }
+                    for (var r = rings.length - 1; r >= 0; r--) {
+                        rings[r].t += dt;
+                        if (rings[r].t > 1) rings.splice(r, 1);
+                    }
+                }
+
+                function stamp(img, x, y, size, alpha) {
+                    ctx.globalAlpha = alpha;
+                    ctx.drawImage(img, x - size / 2, y - size / 2, size, size);
+                }
+
+                function draw(now) {
+                    ctx.clearRect(0, 0, W, H);
+                    ctx.globalAlpha = 1;
+                    ctx.globalCompositeOperation = "source-over";
+                    ctx.drawImage(anatomy, 0, 0, W, H);
+
+                    ctx.globalCompositeOperation = "lighter";
+                    ctx.lineCap = "round";
+
+                    // Connections that just carried a signal stay lit briefly,
+                    // so a chain leaves a visible trail behind it.
+                    for (var i = 0; i < links.length; i++) {
+                        var l = links[i];
+                        if (l.heat < 0.03) continue;
+                        ctx.beginPath();
+                        ctx.moveTo(l.a.x, l.a.y);
+                        ctx.quadraticCurveTo(l.cx, l.cy, l.b.x, l.b.y);
+                        ctx.lineWidth = 0.7 + l.heat;
+                        ctx.strokeStyle =
+                            "rgba(126,240,255," + (l.heat * 0.28).toFixed(3) + ")";
+                        ctx.stroke();
+                    }
+
+                    // Signals: a comet head with a short tail along the curve.
+                    for (var s = 0; s < signals.length; s++) {
+                        var sig = signals[s];
+                        var t = sig.fwd ? sig.t : 1 - sig.t;
+                        var dir = sig.fwd ? -1 : 1;
+                        var head = at(sig.l, t);
+                        ctx.beginPath();
+                        ctx.moveTo(head.x, head.y);
+                        for (var q = 1; q <= 4; q++) {
+                            var p = at(sig.l, Math.min(1, Math.max(0, t + dir * q * 0.04)));
+                            ctx.lineTo(p.x, p.y);
+                        }
+                        ctx.strokeStyle = "rgba(126,240,255,0.45)";
+                        ctx.lineWidth = 1.4;
+                        ctx.stroke();
+                        stamp(spriteTip, head.x, head.y, 24, 0.8);
+                    }
+
+                    for (var c = 0; c < cells.length; c++) {
+                        var cell = cells[c];
+                        // A slow breath keeps resting cells from looking dead.
+                        var breath = 0.5 + 0.5 * Math.sin(now * 0.6 + cell.phase);
+                        var g = cell.glow;
+                        stamp(
+                            spriteSoma,
+                            cell.x,
+                            cell.y,
+                            cell.r * 6 + breath * 6 + g * 20,
+                            0.2 + breath * 0.08 + g * 0.42,
+                        );
+                        if (g > 0.05) stamp(spriteTip, cell.x, cell.y, cell.r * 8 + g * 48, g * 0.8);
+                        ctx.globalAlpha = 0.5 + g * 0.5;
+                        ctx.fillStyle = g > 0.4 ? "#ffffff" : "#d9ccff";
+                        ctx.beginPath();
+                        ctx.arc(cell.x, cell.y, cell.r * 0.6, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+
+                    ctx.globalAlpha = 1;
+                    for (var r = 0; r < rings.length; r++) {
+                        var ring = rings[r];
+                        ctx.beginPath();
+                        ctx.arc(ring.x, ring.y, 12 + ring.t * 180, 0, Math.PI * 2);
+                        ctx.strokeStyle =
+                            "rgba(126,240,255," + ((1 - ring.t) * 0.28).toFixed(3) + ")";
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                    }
+                    ctx.globalCompositeOperation = "source-over";
+                }
+
+                function frame(ms) {
+                    if (!running) return;
+                    var now = ms / 1000;
+                    var dt = Math.min(0.05, now - last || 0.016);
+                    last = now;
+                    if (cells.length) {
+                        step(dt, now);
+                        draw(now);
+                    }
+                    requestAnimationFrame(frame);
+                }
+
+                // Reduced motion: one still frame, no loop.
+                function still() {
+                    for (var i = 0; i < 90; i++) step(1 / 60, i / 60);
+                    draw(0);
+                }
+
+                if (!reduced) {
+                    window.addEventListener(
+                        "pointermove",
+                        function (e) {
+                            pointer.x = e.clientX;
+                            pointer.y = e.clientY;
+                            pointer.on = true;
+                        },
+                        { passive: true },
+                    );
+
+                    window.addEventListener("pointerleave", function () {
+                        pointer.on = false;
+                    });
+
+                    field.addEventListener("pointerdown", function (e) {
+                        rings.push({ x: e.clientX, y: e.clientY, t: 0 });
+                        var best = null,
+                            bestD = Infinity;
+                        for (var i = 0; i < cells.length; i++) {
+                            var d = Math.hypot(cells[i].x - e.clientX, cells[i].y - e.clientY);
+                            if (d < bestD) {
+                                bestD = d;
+                                best = cells[i];
+                            }
+                        }
+                        if (best) send(best, 0);
+                    });
+
+                    // Nothing to animate while the page is out of sight.
+                    document.addEventListener("visibilitychange", function () {
+                        if (document.hidden) {
+                            running = false;
+                        } else if (!running) {
+                            running = true;
+                            last = performance.now() / 1000;
+                            requestAnimationFrame(frame);
+                        }
+                    });
+                }
+
+                var timer;
+                function later() {
+                    clearTimeout(timer);
+                    timer = setTimeout(resize, 180);
+                }
+                if (window.ResizeObserver) {
+                    new ResizeObserver(later).observe(field);
+                } else {
+                    window.addEventListener("resize", later);
+                }
+
+                resize();
+                if (!reduced) requestAnimationFrame(frame);
+            })();
+        </script>
+    </body>
+</html>
+{{ end }}

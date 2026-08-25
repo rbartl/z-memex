@@ -90,8 +90,8 @@ Postgres is published on `5433` for psql access; the server listens on `3000`.
 | `POSTGRES_URL` | yes | set by compose | Postgres connection string |
 | `OLLAMA_URL` | yes | set by compose | Ollama endpoint |
 | `MCP_AUTH_TOKEN` | yes | — | Bearer token for `/mcp`. Compose refuses to start without it |
-| `UI_USER` | yes | `admin` | Web UI basic-auth user |
-| `UI_PASS` | yes | `password` | Web UI basic-auth password — change this |
+| `UI_USER` | yes | `admin` | Web UI login user |
+| `UI_PASS` | yes | `password` | Web UI login password — change this |
 | `EXTRACTOR` | no | `ollama` | `ollama` or `anthropic` |
 | `OLLAMA_EXTRACT_MODEL` | no | `gemma4:26b` | Model used for entity/relationship extraction |
 | `OLLAMA_CHAT_MODEL` | no | `llama3.2` | Model backing the chat UI |
@@ -147,7 +147,7 @@ Each memory records the client that stored it. On `initialize` the server assign
 
 ## Web UI
 
-Available at `http://localhost:3000/ui` (basic auth, credentials from `UI_USER` / `UI_PASS`).
+Available at `http://localhost:3000/ui`. Unauthenticated visits land on a sign-in form; the credentials are `UI_USER` / `UI_PASS`.
 
 - **Memories** — browse and search with semantic search, or open a memory for detail (importance, access count, last accessed, related memories grouped by shared entity)
 - **Graph** — explore the interactive knowledge graph (D3.js), filtered by entity
@@ -160,7 +160,13 @@ Note the rewrite can work against the lexical half of the search by trading your
 
 ## Security
 
-The MCP endpoint requires a bearer token; the web UI requires basic auth. Both are rate-limited per client IP, and request bodies are capped at 1 MiB. `/health` is deliberately open for uptime monitors.
+The MCP endpoint requires a bearer token; the web UI requires a login session. Both are rate-limited per client IP, and request bodies are capped at 1 MiB. `/health` and the landing page are deliberately open.
+
+The UI login is a normal HTML form (`/ui/login`) that trades the credentials for an opaque 256-bit session token in an `HttpOnly`, `SameSite=Lax` cookie scoped to `/ui`, so it is never sent to the MCP endpoints. `Secure` is set when the request arrives over TLS (directly or through a proxy that sets `X-Forwarded-Proto`). Login posts get their own tight rate limit (10/min per IP) on top of the UI-wide budget, and `SameSite=Lax` is what stands in for CSRF tokens on the delete and chat endpoints.
+
+Sessions live in the server's memory, so a restart signs you out — the tradeoff for keeping session state off the database on a single-user deployment. Each session clears two deadlines: an idle window of 7 days that slides forward on use, and an absolute lifetime of 30 days fixed at login and never extended, so a stolen cookie cannot be kept alive indefinitely by polling. **Signing out ends every session, not just the one in the browser you clicked from** — one person owns them all, so that is also the recovery path if you think a cookie has leaked. Signing in from a second device is additive and does not disturb the first.
+
+Signed-in responses are sent `Cache-Control: no-store` so memory contents do not survive in the browser's history or disk cache after sign-out. Vendored static assets are the one exception (`private, max-age=3600`): they are public library code that happens to sit behind the gate.
 
 The rate limiter identifies clients by the connection's peer address, which is correct when memex is exposed directly (as `docker-compose.yml` does) and cannot be spoofed. **If you put memex behind a reverse proxy, load balancer, or CDN, change it** — otherwise every request arrives wearing the proxy's address and shares one bucket, so one busy client locks out everyone else. See `RateLimitByClientIP` in `internal/httpmw`.
 

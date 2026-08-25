@@ -75,6 +75,31 @@
                 border-bottom-color: var(--accent);
             }
 
+            /* Sign out is a POST, so it has to be a form — styled to sit in
+               the nav like the links beside it. */
+            nav .logout-form {
+                margin-left: auto;
+            }
+
+            nav .logout-btn {
+                background: none;
+                border: none;
+                font: inherit;
+                color: var(--text-dim);
+                font-size: 0.9rem;
+                cursor: pointer;
+                padding: 0.5rem 0;
+                border-bottom: 2px solid transparent;
+                transition:
+                    color 0.2s,
+                    border-color 0.2s;
+            }
+
+            nav .logout-btn:hover {
+                color: var(--text);
+                border-bottom-color: var(--accent);
+            }
+
             main {
                 max-width: 1200px;
                 margin: 0 auto;
@@ -359,6 +384,9 @@
             <a href="/ui/graph">Graph</a>
             <a href="/ui/chat">Chat</a>
             <a href="/ui/setup">Setup</a>
+            <form method="post" action="/ui/logout" class="logout-form">
+                <button type="submit" class="logout-btn">Sign out</button>
+            </form>
         </nav>
         <main>{{ template "content" . }}</main>
     </body>

@@ -77,9 +77,7 @@ func main() {
 	mcpServer := mcp.NewServer(svc, authToken)
 	webHandler := web.NewHandler(svc, chatClient, "web", mustEnv("UI_USER"), mustEnv("UI_PASS"))
 
-	r := chi.NewRouter()
-	r.Mount("/", mcpServer.Router())
-	r.Mount("/ui", webHandler.Router())
+	r := router(mcpServer, webHandler)
 
 	addr := ":3000"
 	httpServer := &http.Server{
@@ -109,6 +107,26 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutCtx)
+}
+
+// router wires the three surfaces onto one mux: the public landing page at
+// the root, the signed-in UI under /ui, and the MCP endpoints.
+//
+// The MCP router owns absolute paths ("/health", "/mcp"), so it is attached
+// with Handle rather than Mount. Mount would claim "/" — which the landing
+// page now holds — and rewrite the routing path for the inner router; Handle
+// leaves the path alone, so both endpoints keep their exact URLs along with
+// the router's own middleware chain.
+func router(mcpServer *mcp.Server, webHandler *web.Handler) http.Handler {
+	r := chi.NewRouter()
+	r.Method(http.MethodGet, "/", webHandler.LandingRouter())
+	r.Mount("/ui", webHandler.Router())
+
+	mcpRouter := mcpServer.Router()
+	r.Handle("/health", mcpRouter)
+	r.Handle("/mcp", mcpRouter)
+
+	return r
 }
 
 func runMigrations(pgURL string) error {

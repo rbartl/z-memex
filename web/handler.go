@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -21,12 +20,11 @@ import (
 	"gitlab.com/zollneritsch/memex/internal/memory"
 )
 
-// uiRateLimit bounds requests per client IP to slow down credential
-// brute-forcing against basic auth. The budget has to clear normal browsing by
-// a wide margin: every page load pulls four vendored scripts, the memory
-// search box fires on keystroke (300ms debounce), and the graph refetches on
-// filter changes. Four requests a second still reduces online password
-// guessing to a crawl.
+// uiRateLimit bounds requests per client IP across the whole UI. The budget
+// has to clear normal browsing by a wide margin: every page load pulls four
+// vendored scripts, the memory search box fires on keystroke (300ms debounce),
+// and the graph refetches on filter changes. Credential guessing is held down
+// by the far tighter loginRateLimit instead (see auth.go).
 const (
 	uiRateLimitRequests = 240
 	uiRateLimitWindow   = time.Minute
@@ -60,6 +58,7 @@ type Handler struct {
 	svc       MemoryService
 	chat      ChatStreamer
 	templates map[string]*template.Template
+	sessions  *sessionStore
 	username  string
 	password  string
 }
@@ -126,49 +125,82 @@ func NewHandler(svc MemoryService, chatClient ChatStreamer, templateDir, usernam
 		templates[page] = t
 	}
 
+	// The landing page is a standalone document: it carries its own chrome and
+	// deliberately shares nothing with the signed-in UI's layout.
+	templates["landing.html"] = template.Must(
+		template.New("").Funcs(funcMap).ParseFiles(filepath.Join(templateDir, "templates", "landing.html")),
+	)
+
 	// Partials-only template for htmx fragments (no layout).
 	partials := template.Must(
 		template.New("").Funcs(funcMap).ParseGlob(partialsGlob),
 	)
 	templates["memory_rows.html"] = partials
 
-	return &Handler{svc: svc, chat: chatClient, templates: templates, username: username, password: password}
-}
+	// The login page is its own document: it is shown to someone who is not
+	// logged in, so the layout's nav — every link behind the session gate —
+	// would be dead weight.
+	templates["login.html"] = template.Must(
+		template.New("").Funcs(funcMap).ParseFiles(filepath.Join(templateDir, "templates", "login.html")),
+	)
 
-func (h *Handler) basicAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok ||
-			subtle.ConstantTimeCompare([]byte(user), []byte(h.username)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(pass), []byte(h.password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="memex"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	return &Handler{
+		svc:       svc,
+		chat:      chatClient,
+		templates: templates,
+		sessions:  newSessionStore(),
+		username:  username,
+		password:  password,
+	}
 }
 
 func (h *Handler) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(httpmw.SecurityHeaders)
 	r.Use(httpmw.RateLimitByClientIP(uiRateLimitRequests, uiRateLimitWindow))
-	r.Use(h.basicAuth)
 
-	r.Get("/", h.handleMemories)
-	r.Get("/memories/{id}", h.handleMemoryDetail)
-	r.Delete("/memories/{id}", h.handleDeleteMemory)
-	r.Get("/search", h.handleSearch)
-	r.Get("/graph", h.handleGraph)
-	r.Get("/graph/data", h.handleGraphData)
-	r.Get("/setup", h.handleSetup)
-	r.Get("/chat", h.handleChat)
-	r.Post("/chat/stream", h.handleChatStream)
+	// The login endpoints are the only ones reachable without a session.
+	r.Group(func(pub chi.Router) {
+		pub.Get("/login", h.handleLoginForm)
+		pub.With(httpmw.RateLimitByClientIP(loginRateLimitRequests, loginRateLimitWindow)).
+			Post("/login", h.handleLogin)
+	})
 
-	// Static files
-	r.Handle("/static/*", http.StripPrefix("/ui/static/", http.FileServer(http.Dir(filepath.Join("web", "static")))))
+	r.Group(func(priv chi.Router) {
+		priv.Use(h.requireSession)
+
+		priv.Post("/logout", h.handleLogout)
+
+		priv.Get("/", h.handleMemories)
+		priv.Get("/memories/{id}", h.handleMemoryDetail)
+		priv.Delete("/memories/{id}", h.handleDeleteMemory)
+		priv.Get("/search", h.handleSearch)
+		priv.Get("/graph", h.handleGraph)
+		priv.Get("/graph/data", h.handleGraphData)
+		priv.Get("/setup", h.handleSetup)
+		priv.Get("/chat", h.handleChat)
+		priv.Post("/chat/stream", h.handleChatStream)
+
+		// Static files
+		priv.Handle("/static/*", http.StripPrefix("/ui/static/", http.FileServer(http.Dir(filepath.Join("web", "static")))))
+	})
 
 	return r
+}
+
+// LandingRouter serves the public landing page at the site root. It carries
+// the same security headers and IP rate limit as the rest of the site but no
+// session check: the page renders a canvas animation and holds no data.
+func (h *Handler) LandingRouter() http.Handler {
+	r := chi.NewRouter()
+	r.Use(httpmw.SecurityHeaders)
+	r.Use(httpmw.RateLimitByClientIP(uiRateLimitRequests, uiRateLimitWindow))
+	r.Get("/", h.handleLanding)
+	return r
+}
+
+func (h *Handler) handleLanding(w http.ResponseWriter, r *http.Request) {
+	h.render(w, "landing.html", "landing.html", nil)
 }
 
 func (h *Handler) handleMemories(w http.ResponseWriter, r *http.Request) {
@@ -379,7 +411,9 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	// Set SSE headers before writing anything.
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	// no-store, not the conventional no-cache: the stream carries recalled
+	// memory contents, and requireSession already marked the response no-store.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 

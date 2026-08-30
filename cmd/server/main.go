@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -64,7 +65,11 @@ func main() {
 		slog.Info("using ollama extractor", "model", extractModel)
 	}
 
-	svc := memory.NewService(pg, embedder, extractor)
+	// Extraction is the expensive half of a store: several LLM calls per memory,
+	// served by one Ollama. Keep it to one job at a time unless told otherwise.
+	svc := memory.NewServiceWithConfig(pg, embedder, extractor, memory.ExtractionConfig{
+		Workers: envInt("EXTRACTION_WORKERS"),
+	})
 
 	chatModel := os.Getenv("OLLAMA_CHAT_MODEL")
 	if chatModel == "" {
@@ -107,6 +112,9 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutCtx)
+	if err := svc.Shutdown(shutCtx); err != nil {
+		slog.Warn("extraction queue did not drain before shutdown", "err", err)
+	}
 }
 
 // router wires the three surfaces onto one mux: the public landing page at
@@ -144,6 +152,21 @@ func runMigrations(pgURL string) error {
 	}
 	slog.Info("database migrations applied")
 	return nil
+}
+
+// envInt reads an optional positive integer. Anything missing or unusable
+// yields zero, which leaves the value at the callee's own default.
+func envInt(key string) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		slog.Warn("ignoring invalid integer env var", "key", key, "value", v)
+		return 0
+	}
+	return n
 }
 
 func mustEnv(key string) string {

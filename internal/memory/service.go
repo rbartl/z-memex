@@ -49,10 +49,29 @@ type Service struct {
 	store   Store
 	embed   Embedder
 	extract Extractor
+	queue   *extractionQueue
 }
 
+// NewService builds a service whose background extraction runs with the default
+// bounds: one job at a time.
 func NewService(store Store, embed Embedder, extract Extractor) *Service {
-	return &Service{store: store, embed: embed, extract: extract}
+	return NewServiceWithConfig(store, embed, extract, ExtractionConfig{})
+}
+
+// NewServiceWithConfig is NewService with explicit bounds on the background
+// extraction queue. Unset fields fall back to the defaults.
+func NewServiceWithConfig(store Store, embed Embedder, extract Extractor, cfg ExtractionConfig) *Service {
+	s := &Service{store: store, embed: embed, extract: extract}
+	cfg = cfg.withDefaults()
+	s.queue = newExtractionQueue(cfg, s.runExtraction)
+	slog.Info("extraction queue started", "workers", cfg.Workers)
+	return s
+}
+
+// Shutdown stops accepting extraction jobs and waits for the outstanding ones,
+// giving up when ctx expires.
+func (s *Service) Shutdown(ctx context.Context) error {
+	return s.queue.stop(ctx)
 }
 
 const (
@@ -192,16 +211,19 @@ func (s *Service) StoreMemory(ctx context.Context, content, source, sessionID st
 	return &StoreResult{Memory: m, Action: "created"}, nil
 }
 
-// asyncExtractAndConnect runs entity extraction and cross-connection in the background.
+// asyncExtractAndConnect hands entity extraction and cross-connection to the
+// background queue, which runs them a bounded number at a time. It never blocks
+// the store that produced the memory.
 func (s *Service) asyncExtractAndConnect(m *Memory, vec []float32) {
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := s.extractAndGraph(bgCtx, m); err != nil {
-			slog.Warn("relation extraction failed", "memory_id", m.ID, "err", err)
-		}
-		s.crossConnect(bgCtx, m, vec)
-	}()
+	s.queue.enqueue(extractionJob{memory: m, vec: vec})
+}
+
+// runExtraction is the unit of work a queue worker executes.
+func (s *Service) runExtraction(ctx context.Context, job extractionJob) {
+	if err := s.extractAndGraph(ctx, job.memory); err != nil {
+		slog.Warn("relation extraction failed", "memory_id", job.memory.ID, "err", err)
+	}
+	s.crossConnect(ctx, job.memory, job.vec)
 }
 
 func (s *Service) extractAndGraph(ctx context.Context, m *Memory) error {

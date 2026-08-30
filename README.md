@@ -104,6 +104,16 @@ Postgres is published on `5433` for psql access; the server listens on `3000`.
 | `OLLAMA_EXTRACT_MODEL` | no | `gemma4:26b` | Model used for entity/relationship extraction |
 | `OLLAMA_CHAT_MODEL` | no | `llama3.2` | Model backing the chat UI |
 | `ANTHROPIC_API_KEY` | only if `EXTRACTOR=anthropic` | — | Extraction runs on Haiku, billed per memory |
+| `EXTRACTION_WORKERS` | no | `1` | Background extraction jobs run concurrently. Raise only if the extractor backend can serve parallel calls |
+
+Storing a memory returns as soon as the memory is saved; entity extraction and
+cross-connection then run on a background queue. Each job is several LLM calls,
+so the default of one worker keeps a single local Ollama from being swamped when
+a client stores a batch of memories at once. The queue is unbounded and FIFO —
+a burst waits its turn instead of being dropped, and the backlog shows up as the
+`pending` field on the queue's debug log lines. With `EXTRACTOR=anthropic`, or an
+Ollama serving parallel requests, a higher `EXTRACTION_WORKERS` drains the
+backlog faster.
 
 ## Connecting Clients
 

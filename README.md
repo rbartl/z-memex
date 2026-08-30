@@ -111,7 +111,9 @@ cross-connection then run on a background queue. Each job is several LLM calls,
 so the default of one worker keeps a single local Ollama from being swamped when
 a client stores a batch of memories at once. The queue is unbounded and FIFO —
 a burst waits its turn instead of being dropped, and the backlog shows up as the
-`pending` field on the queue's debug log lines. With `EXTRACTOR=anthropic`, or an
+`pending` field on the queue's debug log lines — and as a badge in the UI nav,
+which polls `/ui/queue` every five seconds and shows how many jobs are still
+outstanding. With `EXTRACTOR=anthropic`, or an
 Ollama serving parallel requests, a higher `EXTRACTION_WORKERS` drains the
 backlog faster.
 

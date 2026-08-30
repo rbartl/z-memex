@@ -1,0 +1,9 @@
+{{ define "extraction_queue.html" }}
+<span
+    class="queue-badge{{ if .Stats.Total }} queue-badge-busy{{ end }}"
+    title="Background entity extraction: {{ .Stats.Running }} running, {{ .Stats.Pending }} waiting, {{ .Stats.Workers }} worker(s)"
+>
+    <span class="queue-dot"></span>
+    {{ if .Stats.Total }}extracting {{ .Stats.Total }}{{ else }}idle{{ end }}
+</span>
+{{ end }}

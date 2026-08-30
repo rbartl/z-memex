@@ -34,6 +34,20 @@ func (c ExtractionConfig) withDefaults() ExtractionConfig {
 	return c
 }
 
+// ExtractionStats is a snapshot of the background extraction backlog, surfaced
+// in the UI so a slow burst looks like progress rather than a hang.
+type ExtractionStats struct {
+	// Running is how many jobs are currently executing.
+	Running int `json:"running"`
+	// Pending is how many jobs are waiting for a worker.
+	Pending int `json:"pending"`
+	// Workers is the configured concurrency.
+	Workers int `json:"workers"`
+}
+
+// Total is the whole outstanding backlog, running jobs included.
+func (s ExtractionStats) Total() int { return s.Running + s.Pending }
+
 type extractionJob struct {
 	memory *Memory
 	vec    []float32
@@ -47,7 +61,9 @@ type extractionQueue struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
 	pending []extractionJob
+	active  int
 	closed  bool
+	workers int
 	wg      sync.WaitGroup
 }
 
@@ -55,7 +71,7 @@ type extractionQueue struct {
 // at a time.
 func newExtractionQueue(cfg ExtractionConfig, run func(context.Context, extractionJob)) *extractionQueue {
 	cfg = cfg.withDefaults()
-	q := &extractionQueue{}
+	q := &extractionQueue{workers: cfg.Workers}
 	q.cond = sync.NewCond(&q.mu)
 
 	q.wg.Add(cfg.Workers)
@@ -72,6 +88,7 @@ func newExtractionQueue(cfg ExtractionConfig, run func(context.Context, extracti
 				ctx, cancel := context.WithTimeout(context.Background(), extractionJobTimeout)
 				run(ctx, job)
 				cancel()
+				q.finish()
 			}
 		}()
 	}
@@ -92,6 +109,7 @@ func (q *extractionQueue) next() (extractionJob, bool) {
 	}
 
 	job := q.pending[0]
+	q.active++
 	q.pending = q.pending[1:]
 	if len(q.pending) == 0 {
 		// Drop the reference to the spent backing array rather than holding a
@@ -99,6 +117,20 @@ func (q *extractionQueue) next() (extractionJob, bool) {
 		q.pending = nil
 	}
 	return job, true
+}
+
+// finish marks the job a worker just ran as no longer in flight.
+func (q *extractionQueue) finish() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.active--
+}
+
+// stats reports the current backlog.
+func (q *extractionQueue) stats() ExtractionStats {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return ExtractionStats{Running: q.active, Pending: len(q.pending), Workers: q.workers}
 }
 
 // enqueue appends a job and returns immediately. Storing a memory never waits

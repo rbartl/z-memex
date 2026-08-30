@@ -52,6 +52,7 @@ type MemoryService interface {
 	GetFullGraph(ctx context.Context) (*memory.Graph, error)
 	GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*memory.Memory, error)
 	GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]memory.RelatedMemory, error)
+	ExtractionQueueStats() memory.ExtractionStats
 }
 
 type Handler struct {
@@ -136,6 +137,7 @@ func NewHandler(svc MemoryService, chatClient ChatStreamer, templateDir, usernam
 		template.New("").Funcs(funcMap).ParseGlob(partialsGlob),
 	)
 	templates["memory_rows.html"] = partials
+	templates["extraction_queue.html"] = partials
 
 	// The login page is its own document: it is shown to someone who is not
 	// logged in, so the layout's nav — every link behind the session gate —
@@ -178,6 +180,7 @@ func (h *Handler) Router() http.Handler {
 		priv.Get("/graph", h.handleGraph)
 		priv.Get("/graph/data", h.handleGraphData)
 		priv.Get("/setup", h.handleSetup)
+		priv.Get("/queue", h.handleQueueStatus)
 		priv.Get("/chat", h.handleChat)
 		priv.Post("/chat/stream", h.handleChatStream)
 
@@ -242,6 +245,15 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "memory_rows.html", "memory_rows.html", map[string]any{"Memories": memories})
+}
+
+// handleQueueStatus renders the nav's extraction-backlog badge. The layout
+// polls it on every page, so it reads an in-memory counter and touches nothing
+// else.
+func (h *Handler) handleQueueStatus(w http.ResponseWriter, r *http.Request) {
+	h.render(w, "extraction_queue.html", "extraction_queue.html", map[string]any{
+		"Stats": h.svc.ExtractionQueueStats(),
+	})
 }
 
 func (h *Handler) handleMemoryDetail(w http.ResponseWriter, r *http.Request) {

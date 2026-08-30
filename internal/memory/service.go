@@ -68,6 +68,13 @@ func NewServiceWithConfig(store Store, embed Embedder, extract Extractor, cfg Ex
 	return s
 }
 
+// ExtractionQueueStats reports how much background extraction work is
+// outstanding. The UI polls this so a long backlog is visible rather than
+// looking like nothing is happening.
+func (s *Service) ExtractionQueueStats() ExtractionStats {
+	return s.queue.stats()
+}
+
 // Shutdown stops accepting extraction jobs and waits for the outstanding ones,
 // giving up when ctx expires.
 func (s *Service) Shutdown(ctx context.Context) error {

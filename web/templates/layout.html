@@ -368,6 +368,56 @@
                 fill: var(--text-dim);
             }
 
+            /* Extraction backlog badge. Entity extraction runs behind a
+               serialized queue, so a burst of stores takes a while to work
+               off — the nav says so instead of leaving the UI looking idle. */
+            .queue-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 0.4rem;
+                font-size: 0.75rem;
+                color: var(--text-dim);
+                background: var(--tag-bg);
+                padding: 0.2rem 0.6rem;
+                border-radius: 999px;
+                white-space: nowrap;
+                cursor: default;
+            }
+
+            .queue-dot {
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: var(--text-dim);
+                flex-shrink: 0;
+            }
+
+            .queue-badge-busy {
+                color: #6cb4ee;
+                background: #1e3a5f;
+            }
+
+            .queue-badge-busy .queue-dot {
+                background: #6cb4ee;
+                animation: queue-pulse 1.4s ease-in-out infinite;
+            }
+
+            @keyframes queue-pulse {
+                0%,
+                100% {
+                    opacity: 1;
+                }
+                50% {
+                    opacity: 0.25;
+                }
+            }
+
+            /* The badge claims the nav's free space, so sign-out sits beside
+               it rather than pushing off to the right on its own. */
+            nav .queue-status + .logout-form {
+                margin-left: 0;
+            }
+
             .htmx-indicator {
                 display: none;
             }
@@ -384,6 +434,13 @@
             <a href="/ui/graph">Graph</a>
             <a href="/ui/chat">Chat</a>
             <a href="/ui/setup">Setup</a>
+            <span
+                class="queue-status"
+                style="margin-left: auto"
+                hx-get="/ui/queue"
+                hx-trigger="load, every 5s"
+                hx-swap="innerHTML"
+            ></span>
             <form method="post" action="/ui/logout" class="logout-form">
                 <button type="submit" class="logout-btn">Sign out</button>
             </form>

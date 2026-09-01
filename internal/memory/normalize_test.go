@@ -78,3 +78,41 @@ func TestNormalizeTagsDoesNotMutateInput(t *testing.T) {
 		t.Errorf("input mutated: %q", in)
 	}
 }
+
+// The variants migration 009 folds: a trailing gloss, separator style and
+// stray quoting all describe one node.
+func TestNormalizeNameFoldsVariants(t *testing.T) {
+	cases := map[string]string{
+		"Go (Golang)":           "go",
+		"Go":                    "go",
+		"v2 (beta)":             "v2",
+		"acme-invoice-sync":     "acme invoice sync",
+		"Acme Invoice Sync":     "acme invoice sync",
+		"'Sprint Review'":       "sprint review",
+		"Süd- und Mitteleuropa": "süd und mitteleuropa",
+		"Grafana (self-hosted)": "grafana",
+	}
+	for in, want := range cases {
+		if got := NormalizeName(in); got != want {
+			t.Errorf("NormalizeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Folding every punctuation mark would collapse these onto "c"; only
+// hyphen, underscore and slash count as separators.
+func TestNormalizeNameKeepsMeaningfulPunctuation(t *testing.T) {
+	for _, in := range []string{"c++", "c#", ".net"} {
+		if got := NormalizeName(in); got != in {
+			t.Errorf("NormalizeName(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
+
+// A name that is nothing but a parenthetical would normalize to the empty
+// string, which UpsertEntity rejects outright.
+func TestNormalizeNameKeepsLoneParenthetical(t *testing.T) {
+	if got := NormalizeName("(KMU)"); got != "(kmu)" {
+		t.Errorf("NormalizeName(\"(KMU)\") = %q, want %q", got, "(kmu)")
+	}
+}

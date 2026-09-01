@@ -124,6 +124,23 @@ var entityTypeAliases = map[string]string{
 	"other":     "concept",
 }
 
+// PromptEntityTypes is the list offered to an extractor: the vocabulary minus
+// the fallback. The fallback stays available to CanonicalEntityType for folding
+// a type the model coins anyway, but naming it in the prompt made it the cheap
+// answer — 35% of the corpus landed on "concept", carrying entries like "layered
+// approach" and "bulk assign" that the prompt's own rules forbid. A model that
+// is not offered a catch-all has to pick a real type or drop the entity, which
+// is the intended outcome.
+var PromptEntityTypes = func() []string {
+	out := make([]string, 0, len(EntityTypes))
+	for _, t := range EntityTypes {
+		if t != FallbackEntityType {
+			out = append(out, t)
+		}
+	}
+	return out
+}()
+
 // entityTypeSet is EntityTypes as a lookup, built once.
 var entityTypeSet = func() map[string]bool {
 	m := make(map[string]bool, len(EntityTypes))

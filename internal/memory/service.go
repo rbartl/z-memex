@@ -35,14 +35,16 @@ type Store interface {
 	SearchHybrid(ctx context.Context, query string, embedding []float32, topK int, cfg ScoringConfig) ([]ScoredMemory, error)
 	RecordAccess(ctx context.Context, ids []uuid.UUID) error
 	UpsertEntity(ctx context.Context, name, entityType string) (uuid.UUID, error)
-	UpsertRelation(ctx context.Context, fromID, toID uuid.UUID, relationship string, memoryID uuid.UUID, confidence float64) error
+	UpsertRelation(ctx context.Context, fromID, toID uuid.UUID, relationship, rawRelationship string, memoryID uuid.UUID, confidence float64) error
 	LinkMemoryEntity(ctx context.Context, memoryID, entityID uuid.UUID) error
 	GetGraphForMemories(ctx context.Context, memoryIDs []uuid.UUID) (*Graph, error)
 	GetGraph(ctx context.Context, entityName string, depth int) (*Graph, error)
-	GetFullGraph(ctx context.Context) (*Graph, error)
+	GetFullGraph(ctx context.Context, includeWeak bool) (*Graph, error)
 	UpdateSummary(ctx context.Context, id uuid.UUID, summary string) error
 	GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*Memory, error)
 	GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]RelatedMemory, error)
+	ListEntities(ctx context.Context, query string, limit int) ([]EntityStat, error)
+	MergeEntities(ctx context.Context, loserID, winnerID uuid.UUID) error
 }
 
 type Service struct {
@@ -233,6 +235,73 @@ func (s *Service) runExtraction(ctx context.Context, job extractionJob) {
 	s.crossConnect(ctx, job.memory, job.vec)
 }
 
+// applyRelation folds one extracted relation onto the closed vocabularies and
+// writes it, linking every memory in linkTo to both of its endpoints. It reports
+// whether an edge was written.
+//
+// Both extraction paths funnel through here so the folding rules — entity type,
+// predicate, direction — are applied in exactly one place.
+func (s *Service) applyRelation(ctx context.Context, r ExtractedRelation, memoryID uuid.UUID, linkTo ...uuid.UUID) bool {
+	fromType, toType := canonicalPair(r)
+
+	label, reversed, ok := CanonicalRelationship(r.Relationship)
+	if !ok {
+		slog.Warn("relationship outside vocabulary, using fallback",
+			"relationship", r.Relationship, "mapped", label,
+			"from", r.FromEntity, "to", r.ToEntity)
+	}
+
+	fromName, toName := r.FromEntity, r.ToEntity
+	if reversed {
+		// The model stated the relation against the predicate's canonical
+		// direction ("Acme employs Max" for "Max works-at Acme"), so
+		// the endpoints swap along with the label.
+		fromName, toName = toName, fromName
+		fromType, toType = toType, fromType
+	}
+
+	fromID, err := s.store.UpsertEntity(ctx, fromName, fromType)
+	if err != nil {
+		slog.Warn("upsert entity failed", "entity", fromName, "err", err)
+		return false
+	}
+	toID, err := s.store.UpsertEntity(ctx, toName, toType)
+	if err != nil {
+		slog.Warn("upsert entity failed", "entity", toName, "err", err)
+		return false
+	}
+
+	if fromID == toID {
+		// Both names resolved to one node. An edge from a thing to itself
+		// carries no information, and the schema now refuses it outright.
+		slog.Debug("skipping self-relation", "entity", fromName, "relationship", label)
+		return false
+	}
+
+	if IsSymmetricRelationship(label) && fromID.String() > toID.String() {
+		// Endpoint order means nothing for a symmetric predicate, so it is fixed
+		// here — otherwise "A same-as B" and "B same-as A" are two edges.
+		// Migration 010 orders the same way: Postgres compares uuid by the bytes
+		// its hex spells, which is the order String() gives.
+		fromID, toID = toID, fromID
+	}
+
+	if err := s.store.UpsertRelation(ctx, fromID, toID, label, r.Relationship, memoryID, r.Confidence); err != nil {
+		slog.Warn("upsert relation failed", "from", fromName, "to", toName, "err", err)
+		return false
+	}
+
+	for _, id := range linkTo {
+		if err := s.store.LinkMemoryEntity(ctx, id, fromID); err != nil {
+			slog.Warn("link memory entity failed", "memory_id", id, "entity_id", fromID, "err", err)
+		}
+		if err := s.store.LinkMemoryEntity(ctx, id, toID); err != nil {
+			slog.Warn("link memory entity failed", "memory_id", id, "entity_id", toID, "err", err)
+		}
+	}
+	return true
+}
+
 func (s *Service) extractAndGraph(ctx context.Context, m *Memory) error {
 	result, err := s.extract.Extract(ctx, m.Content)
 	if err != nil {
@@ -249,26 +318,7 @@ func (s *Service) extractAndGraph(ctx context.Context, m *Memory) error {
 	}
 
 	for _, r := range result.Relations {
-		fromType, toType := canonicalPair(r)
-		fromID, err := s.store.UpsertEntity(ctx, r.FromEntity, fromType)
-		if err != nil {
-			slog.Warn("upsert entity failed", "entity", r.FromEntity, "err", err)
-			continue
-		}
-		toID, err := s.store.UpsertEntity(ctx, r.ToEntity, toType)
-		if err != nil {
-			slog.Warn("upsert entity failed", "entity", r.ToEntity, "err", err)
-			continue
-		}
-		if err := s.store.UpsertRelation(ctx, fromID, toID, r.Relationship, m.ID, r.Confidence); err != nil {
-			slog.Warn("upsert relation failed", "from", r.FromEntity, "to", r.ToEntity, "err", err)
-		}
-		if err := s.store.LinkMemoryEntity(ctx, m.ID, fromID); err != nil {
-			slog.Warn("link memory entity failed", "memory_id", m.ID, "entity_id", fromID, "err", err)
-		}
-		if err := s.store.LinkMemoryEntity(ctx, m.ID, toID); err != nil {
-			slog.Warn("link memory entity failed", "memory_id", m.ID, "entity_id", toID, "err", err)
-		}
+		s.applyRelation(ctx, r, m.ID, m.ID)
 	}
 	slog.Info("extracted relations", "memory_id", m.ID, "count", len(result.Relations))
 	return nil
@@ -295,34 +345,11 @@ func (s *Service) crossConnect(ctx context.Context, m *Memory, vec []float32) {
 		}
 
 		for _, r := range relations {
-			fromType, toType := canonicalPair(r)
-			fromID, err := s.store.UpsertEntity(ctx, r.FromEntity, fromType)
-			if err != nil {
-				slog.Warn("upsert entity failed", "entity", r.FromEntity, "err", err)
-				continue
+			// A cross-relation belongs to both memories, so both are linked to
+			// the entities it names.
+			if s.applyRelation(ctx, r, m.ID, m.ID, n.Memory.ID) {
+				connected++
 			}
-			toID, err := s.store.UpsertEntity(ctx, r.ToEntity, toType)
-			if err != nil {
-				slog.Warn("upsert entity failed", "entity", r.ToEntity, "err", err)
-				continue
-			}
-			if err := s.store.UpsertRelation(ctx, fromID, toID, r.Relationship, m.ID, r.Confidence); err != nil {
-				slog.Warn("upsert relation failed", "from", r.FromEntity, "to", r.ToEntity, "err", err)
-			}
-			// Link both memories to the entities
-			if err := s.store.LinkMemoryEntity(ctx, m.ID, fromID); err != nil {
-				slog.Warn("link memory entity failed", "memory_id", m.ID, "entity_id", fromID, "err", err)
-			}
-			if err := s.store.LinkMemoryEntity(ctx, m.ID, toID); err != nil {
-				slog.Warn("link memory entity failed", "memory_id", m.ID, "entity_id", toID, "err", err)
-			}
-			if err := s.store.LinkMemoryEntity(ctx, n.Memory.ID, fromID); err != nil {
-				slog.Warn("link memory entity failed", "memory_id", n.Memory.ID, "entity_id", fromID, "err", err)
-			}
-			if err := s.store.LinkMemoryEntity(ctx, n.Memory.ID, toID); err != nil {
-				slog.Warn("link memory entity failed", "memory_id", n.Memory.ID, "entity_id", toID, "err", err)
-			}
-			connected++
 		}
 	}
 
@@ -465,6 +492,36 @@ func canonicalPair(r ExtractedRelation) (fromType, toType string) {
 	return fromType, toType
 }
 
+// ListEntities returns graph nodes with their edge and memory counts, filtered
+// by a name substring when query is non-empty.
+func (s *Service) ListEntities(ctx context.Context, query string, limit int) ([]EntityStat, error) {
+	switch {
+	case limit <= 0:
+		limit = defaultListLimit
+	case limit > maxListLimit:
+		limit = maxListLimit
+	}
+	return s.store.ListEntities(ctx, query, limit)
+}
+
+// MergeEntities folds one entity into another, recording the loser's name as an
+// alias so later extractions resolve to the survivor. Aliases are the half of
+// identity that normalization cannot reach: "Max" and "Maximilian Zollneritsch"
+// share no characters to fold, so a person has to say they are one node.
+//
+// The merge cannot be undone, so it is only ever reached from an explicit
+// action in the UI — never from extraction.
+func (s *Service) MergeEntities(ctx context.Context, loserID, winnerID uuid.UUID) error {
+	if loserID == winnerID {
+		return fmt.Errorf("cannot merge an entity into itself")
+	}
+	if err := s.store.MergeEntities(ctx, loserID, winnerID); err != nil {
+		return err
+	}
+	slog.Info("merged entities", "loser", loserID, "winner", winnerID)
+	return nil
+}
+
 func (s *Service) GetGraph(ctx context.Context, entity string, depth int) (*Graph, error) {
 	if depth == 0 {
 		depth = 2
@@ -472,6 +529,8 @@ func (s *Service) GetGraph(ctx context.Context, entity string, depth int) (*Grap
 	return s.store.GetGraph(ctx, entity, depth)
 }
 
-func (s *Service) GetFullGraph(ctx context.Context) (*Graph, error) {
-	return s.store.GetFullGraph(ctx)
+// GetFullGraph returns the whole graph. includeWeak brings back the entities
+// that have not earned a place in it (see storage.weakEntityCondition).
+func (s *Service) GetFullGraph(ctx context.Context, includeWeak bool) (*Graph, error) {
+	return s.store.GetFullGraph(ctx, includeWeak)
 }

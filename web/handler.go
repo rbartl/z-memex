@@ -49,10 +49,12 @@ type MemoryService interface {
 	RecallMemory(ctx context.Context, query string, topK int) ([]memory.ScoredMemory, error)
 	DeleteMemory(ctx context.Context, id uuid.UUID) error
 	GetGraph(ctx context.Context, entity string, depth int) (*memory.Graph, error)
-	GetFullGraph(ctx context.Context) (*memory.Graph, error)
+	GetFullGraph(ctx context.Context, includeWeak bool) (*memory.Graph, error)
 	GetMemoriesByEntity(ctx context.Context, entityID uuid.UUID) ([]*memory.Memory, error)
 	GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]memory.RelatedMemory, error)
 	ExtractionQueueStats() memory.ExtractionStats
+	ListEntities(ctx context.Context, query string, limit int) ([]memory.EntityStat, error)
+	MergeEntities(ctx context.Context, loserID, winnerID uuid.UUID) error
 }
 
 type Handler struct {
@@ -115,7 +117,7 @@ func NewHandler(svc MemoryService, chatClient ChatStreamer, templateDir, usernam
 
 	// Parse each page template independently with the layout + partials.
 	// This avoids "content" block name collisions between pages.
-	pages := []string{"memories.html", "memory.html", "graph.html", "setup.html", "chat.html"}
+	pages := []string{"memories.html", "memory.html", "graph.html", "setup.html", "chat.html", "entities.html", "merge.html"}
 	templates := make(map[string]*template.Template)
 	for _, page := range pages {
 		pageFile := filepath.Join(templateDir, "templates", page)
@@ -138,6 +140,8 @@ func NewHandler(svc MemoryService, chatClient ChatStreamer, templateDir, usernam
 	)
 	templates["memory_rows.html"] = partials
 	templates["extraction_queue.html"] = partials
+	templates["entity_rows.html"] = partials
+	templates["merge_candidates.html"] = partials
 
 	// The login page is its own document: it is shown to someone who is not
 	// logged in, so the layout's nav — every link behind the session gate —
@@ -181,6 +185,11 @@ func (h *Handler) Router() http.Handler {
 		priv.Get("/graph/data", h.handleGraphData)
 		priv.Get("/setup", h.handleSetup)
 		priv.Get("/queue", h.handleQueueStatus)
+		priv.Get("/entities", h.handleEntities)
+		priv.Get("/entities/rows", h.handleEntityRows)
+		priv.Get("/entities/{id}/merge", h.handleMergeForm)
+		priv.Get("/entities/{id}/merge/candidates", h.handleMergeCandidates)
+		priv.Post("/entities/{id}/merge", h.handleMerge)
 		priv.Get("/chat", h.handleChat)
 		priv.Post("/chat/stream", h.handleChatStream)
 
@@ -245,6 +254,113 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "memory_rows.html", "memory_rows.html", map[string]any{"Memories": memories})
+}
+
+// entityListLimit bounds every entity listing on the page. The corpus is in the
+// hundreds of nodes, so this is a page size rather than a real constraint.
+const entityListLimit = 200
+
+func (h *Handler) handleEntities(w http.ResponseWriter, r *http.Request) {
+	h.render(w, "entities.html", "layout", map[string]any{"Title": "Entities"})
+}
+
+func (h *Handler) handleEntityRows(w http.ResponseWriter, r *http.Request) {
+	entities, err := h.svc.ListEntities(r.Context(), r.URL.Query().Get("q"), entityListLimit)
+	if err != nil {
+		slog.Error("list entities failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	h.render(w, "entity_rows.html", "entity_rows.html", map[string]any{"Entities": entities})
+}
+
+// entityByID finds one entity through the same listing query the page uses,
+// which keeps the counts on the merge screen identical to the ones on the list.
+func (h *Handler) entityByID(ctx context.Context, id uuid.UUID) (*memory.EntityStat, error) {
+	all, err := h.svc.ListEntities(ctx, "", maxEntityLookup)
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		if all[i].ID == id {
+			return &all[i], nil
+		}
+	}
+	return nil, fmt.Errorf("entity %s not found", id)
+}
+
+// maxEntityLookup has to cover the whole graph: entityByID scans the listing
+// rather than adding a second query path for one row.
+const maxEntityLookup = 500
+
+func (h *Handler) handleMergeForm(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	src, err := h.entityByID(r.Context(), id)
+	if err != nil {
+		http.Error(w, "entity not found", http.StatusNotFound)
+		return
+	}
+	// Seeding the search with the entity's own name puts the likely aliases on
+	// screen straight away: searching "Max" surfaces "Maximilian Zollneritsch".
+	h.render(w, "merge.html", "layout", map[string]any{
+		"Title":  "Merge entity",
+		"Source": src,
+		"Query":  src.Name,
+	})
+}
+
+func (h *Handler) handleMergeCandidates(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	src, err := h.entityByID(r.Context(), id)
+	if err != nil {
+		http.Error(w, "entity not found", http.StatusNotFound)
+		return
+	}
+
+	candidates, err := h.svc.ListEntities(r.Context(), r.URL.Query().Get("q"), entityListLimit)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// An entity cannot be merged into itself, so it never appears as a target.
+	kept := make([]memory.EntityStat, 0, len(candidates))
+	for _, c := range candidates {
+		if c.ID != id {
+			kept = append(kept, c)
+		}
+	}
+
+	h.render(w, "merge_candidates.html", "merge_candidates.html", map[string]any{
+		"Source":     src,
+		"Candidates": kept,
+	})
+}
+
+func (h *Handler) handleMerge(w http.ResponseWriter, r *http.Request) {
+	loser, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	winner, err := uuid.Parse(r.FormValue("winner"))
+	if err != nil {
+		http.Error(w, "invalid target entity", http.StatusBadRequest)
+		return
+	}
+	if err := h.svc.MergeEntities(r.Context(), loser, winner); err != nil {
+		slog.Error("merge entities failed", "loser", loser, "winner", winner, "err", err)
+		http.Error(w, "merge failed", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/ui/entities", http.StatusSeeOther)
 }
 
 // handleQueueStatus renders the nav's extraction-backlog badge. The layout
@@ -320,7 +436,9 @@ func (h *Handler) handleGraphData(w http.ResponseWriter, r *http.Request) {
 	var graph *memory.Graph
 	var err error
 	if entity == "" {
-		graph, err = h.svc.GetFullGraph(r.Context())
+		// weak=1 brings back the single-mention "concept" nodes the graph hides
+		// by default; the page has a toggle for it.
+		graph, err = h.svc.GetFullGraph(r.Context(), r.URL.Query().Get("weak") == "1")
 	} else {
 		graph, err = h.svc.GetGraph(r.Context(), entity, 2)
 	}

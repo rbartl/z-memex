@@ -1,0 +1,32 @@
+{{ define "entities.html" }} {{ template "layout" . }} {{ end }} {{ define
+"content" }}
+<h1>Entities</h1>
+<p style="color:var(--text-dim);font-size:0.9rem;margin-bottom:1.5rem;">
+    One thing can arrive under several names — “Max”, “Maximilian”,
+    “Maximilian Zollneritsch” — and nothing about the spellings says they are the
+    same person. Merging folds one into another and remembers the name as an
+    alias, so later extractions land on the survivor.
+</p>
+<input
+    class="search-bar"
+    type="search"
+    name="q"
+    placeholder="Search entities..."
+    hx-get="/ui/entities/rows"
+    hx-trigger="input changed delay:300ms, load"
+    hx-target="#entity-rows"
+/>
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Edges</th>
+            <th>Memories</th>
+            <th>Aliases</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody id="entity-rows"></tbody>
+</table>
+{{ end }}

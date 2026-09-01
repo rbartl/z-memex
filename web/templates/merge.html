@@ -1,0 +1,42 @@
+{{ define "merge.html" }} {{ template "layout" . }} {{ end }} {{ define
+"content" }}
+<a class="back-link" href="/ui/entities">&larr; Entities</a>
+<h1>Merge “{{ .Source.Name }}”</h1>
+<div class="card">
+    <div class="label">Merging away</div>
+    <div class="value" style="margin-bottom:0.75rem;">
+        <strong>{{ .Source.Name }}</strong>
+        <span class="tag">{{ .Source.Type }}</span>
+        <span style="color:var(--text-dim);font-size:0.85rem;"
+            >{{ .Source.Relations }} edges · {{ .Source.Memories }} memories</span
+        >
+    </div>
+    <p style="color:var(--text-dim);font-size:0.85rem;">
+        Its edges and memories move to whichever entity you pick below, and
+        “{{ .Source.Name }}” becomes an alias of it. This cannot be undone.
+    </p>
+</div>
+
+<input
+    class="search-bar"
+    type="search"
+    name="q"
+    value="{{ .Query }}"
+    placeholder="Search for the entity to keep..."
+    hx-get="/ui/entities/{{ .Source.ID }}/merge/candidates"
+    hx-trigger="input changed delay:300ms, load"
+    hx-target="#candidate-rows"
+/>
+<table>
+    <thead>
+        <tr>
+            <th>Keep this one</th>
+            <th>Type</th>
+            <th>Edges</th>
+            <th>Memories</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody id="candidate-rows"></tbody>
+</table>
+{{ end }}

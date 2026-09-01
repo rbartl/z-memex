@@ -22,7 +22,8 @@ func NewAnthropic(apiKey string) *Anthropic {
 }
 
 func buildExtractionPrompt() string {
-	typeList := strings.Join(memory.EntityTypes, ", ")
+	typeList := strings.Join(memory.PromptEntityTypes, ", ")
+	relList := strings.Join(memory.Relationships, ", ")
 	return `You are a knowledge graph extractor and summarizer. Given a piece of text, do two things:
 
 1. Write a one-sentence summary that captures the key fact or decision.
@@ -37,7 +38,7 @@ Return ONLY a JSON object with this shape:
       "from_type": "entity type (see rules)",
       "to_entity": "entity name",
       "to_type": "entity type (see rules)",
-      "relationship": "short verb phrase, e.g. uses, prefers, worked-on, relates-to, depends-on, created-by",
+      "relationship": "one predicate from the allowed list (see rules)",
       "confidence": 0.0 to 1.0
     }
   ]
@@ -50,7 +51,10 @@ Rules:
 - Do NOT extract abstract noun phrases, descriptions, quantities, states, or wording lifted from this text just because it appears. Half the entities in a knowledge base connect nothing if this rule is ignored.
 - Prefer the shortest name that still identifies the thing ("Gemini Vision", not "the Gemini Vision capability")
 - Entity types MUST be one of: ` + typeList + `
-- If no listed type fits, use "concept". Never invent a type.
+- If no listed type fits, do NOT extract the entity. Never invent a type.
+- Relationships MUST be one of: ` + relList + `
+- Each predicate has a fixed direction: write from_entity as the subject. Prefer the most specific predicate that is true; use "relates-to" only when nothing else fits.
+- Do not invent a predicate, and do not state one backwards ("Acme employs Max" should be from_entity "Max", relationship "works-at", to_entity "Acme").
 - Use an empty array for relations if no meaningful relations found
 - Fewer, better entities beat more. An empty array is a valid answer.
 - No explanation, no markdown, only the JSON object
@@ -60,7 +64,8 @@ Text to analyze:
 }
 
 func buildCrossRelationPrompt(contentA, contentB string) string {
-	typeList := strings.Join(memory.EntityTypes, ", ")
+	typeList := strings.Join(memory.PromptEntityTypes, ", ")
+	relList := strings.Join(memory.Relationships, ", ")
 	return `You are a knowledge graph extractor. You are given two separate pieces of knowledge from a personal knowledge base. Identify relationships that connect entities ACROSS these two texts.
 
 Return ONLY a JSON array of relations. Each relation has this shape:
@@ -69,7 +74,7 @@ Return ONLY a JSON array of relations. Each relation has this shape:
   "from_type": "entity type (see rules)",
   "to_entity": "entity name (from either text)",
   "to_type": "entity type (see rules)",
-  "relationship": "short verb phrase, e.g. uses, prefers, worked-on, relates-to, depends-on, created-by, contradicts, supersedes, supports",
+  "relationship": "one predicate from the allowed list (see rules)",
   "confidence": 0.0 to 1.0
 }
 
@@ -79,7 +84,10 @@ Rules:
 - Do NOT extract abstract noun phrases, descriptions, quantities, states, or wording lifted from this text just because it appears. Half the entities in a knowledge base connect nothing if this rule is ignored.
 - Prefer the shortest name that still identifies the thing ("Gemini Vision", not "the Gemini Vision capability")
 - Entity types MUST be one of: ` + typeList + `
-- If no listed type fits, use "concept". Never invent a type.
+- If no listed type fits, do NOT extract the entity. Never invent a type.
+- Relationships MUST be one of: ` + relList + `
+- Each predicate has a fixed direction: write from_entity as the subject. Prefer the most specific predicate that is true; use "relates-to" only when nothing else fits.
+- Do not invent a predicate, and do not state one backwards ("Acme employs Max" should be from_entity "Max", relationship "works-at", to_entity "Acme").
 - Return [] if no meaningful cross-text relations found
 - Fewer, better entities beat more. [] is a valid answer.
 - No explanation, no markdown, only the JSON array

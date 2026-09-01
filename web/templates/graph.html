@@ -2,9 +2,18 @@
 "content" }}
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;">
     <h1 style="margin-bottom:0;">Knowledge Graph</h1>
-    <button id="presentation-toggle" class="btn btn-secondary" onclick="togglePresentation()">
-        Presentation Mode
-    </button>
+    <div style="display:flex;align-items:center;gap:1rem;">
+        <label
+            style="display:flex;align-items:center;gap:0.4rem;font-size:0.85rem;color:var(--text-dim);cursor:pointer;"
+            title="Single-mention 'concept' nodes are hidden by default: they carry one edge and one memory, and are usually a phrase the extractor should not have pulled out."
+        >
+            <input type="checkbox" id="weak-toggle" onchange="reloadGraph()" />
+            Show unconnected concepts
+        </label>
+        <button id="presentation-toggle" class="btn btn-secondary" onclick="togglePresentation()">
+            Presentation Mode
+        </button>
+    </div>
 </div>
 <input
     class="search-bar"
@@ -95,10 +104,15 @@
         // Load full graph on page load
         loadGraph("");
 
+        // Exposed on window so the "show unconnected concepts" checkbox can
+        // re-run the current query from outside this scope.
+        window.reloadGraph = () => loadGraph(searchInput.value);
+
         function loadGraph(entity) {
+            const weak = document.getElementById("weak-toggle").checked ? "1" : "";
             const url = entity.trim()
                 ? "/ui/graph/data?entity=" + encodeURIComponent(entity)
-                : "/ui/graph/data";
+                : "/ui/graph/data" + (weak ? "?weak=1" : "");
 
             fetch(url)
                 .then((r) => r.json())

@@ -1,50 +1,19 @@
 package web
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 
 	"gitlab.com/zollneritsch/memex/internal/memory"
 )
 
-// queueStatsService satisfies MemoryService for the one endpoint that reads
-// the extraction backlog; every other method is unused here.
-type queueStatsService struct {
-	stats memory.ExtractionStats
-}
-
-func (s queueStatsService) ExtractionQueueStats() memory.ExtractionStats { return s.stats }
-
-func (queueStatsService) ListMemories(context.Context, memory.Filter) ([]*memory.Memory, error) {
-	return nil, nil
-}
-func (queueStatsService) GetMemory(context.Context, uuid.UUID) (*memory.Memory, error) {
-	return nil, nil
-}
-func (queueStatsService) RecallMemory(context.Context, string, int) ([]memory.ScoredMemory, error) {
-	return nil, nil
-}
-func (queueStatsService) DeleteMemory(context.Context, uuid.UUID) error { return nil }
-func (queueStatsService) GetGraph(context.Context, string, int) (*memory.Graph, error) {
-	return nil, nil
-}
-func (queueStatsService) GetFullGraph(context.Context) (*memory.Graph, error) { return nil, nil }
-func (queueStatsService) GetMemoriesByEntity(context.Context, uuid.UUID) ([]*memory.Memory, error) {
-	return nil, nil
-}
-func (queueStatsService) GetRelatedMemories(context.Context, uuid.UUID) ([]memory.RelatedMemory, error) {
-	return nil, nil
-}
-
 func queueServer(t *testing.T, stats memory.ExtractionStats) (http.Handler, *http.Cookie) {
 	t.Helper()
-	h := NewHandler(queueStatsService{stats: stats}, nil, ".", testUser, testPass)
+	h := NewHandler(&fakeService{stats: stats}, nil, ".", testUser, testPass)
 	srv := chi.NewRouter()
 	srv.Mount("/ui", h.Router())
 	return srv, login(t, srv, testUser, testPass)

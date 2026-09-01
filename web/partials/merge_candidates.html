@@ -1,0 +1,24 @@
+{{ define "merge_candidates.html" }} {{ if .Candidates }} {{ range .Candidates }}
+<tr>
+    <td>{{ .Name }}</td>
+    <td><span class="tag">{{ .Type }}</span></td>
+    <td>{{ .Relations }}</td>
+    <td>{{ .Memories }}</td>
+    <td style="text-align:right;">
+        <form method="post" action="/ui/entities/{{ $.Source.ID }}/merge">
+            <input type="hidden" name="winner" value="{{ .ID }}" />
+            <button
+                type="submit"
+                class="btn btn-danger btn-sm"
+                onclick="return confirm('Merge “{{ $.Source.Name }}” into “{{ .Name }}”? This cannot be undone.')"
+            >
+                Merge into this
+            </button>
+        </form>
+    </td>
+</tr>
+{{ end }} {{ else }}
+<tr>
+    <td colspan="5" class="empty">No other entities match.</td>
+</tr>
+{{ end }} {{ end }}

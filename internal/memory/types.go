@@ -181,3 +181,15 @@ var DefaultScoringConfig = ScoringConfig{
 	AccessWeight:        0.003,
 	RecencyHalfLifeDays: 90.0,
 }
+
+// EntityStat is a graph node with the numbers that say whether it earns its
+// place: how many edges it carries, how many memories name it, and which other
+// names resolve to it.
+type EntityStat struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	Type      string    `json:"type"`
+	Relations int       `json:"relations"`
+	Memories  int       `json:"memories"`
+	Aliases   []string  `json:"aliases,omitempty"`
+}

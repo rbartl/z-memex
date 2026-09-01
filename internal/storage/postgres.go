@@ -2,11 +2,14 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 	"gitlab.com/zollneritsch/memex/internal/memory"
@@ -273,11 +276,25 @@ func (p *Postgres) UpsertEntity(ctx context.Context, name, entityType string) (u
 		return uuid.Nil, fmt.Errorf("entity name is empty")
 	}
 
+	// A curated alias wins over creating a node: once someone has said that
+	// "Max" is "Maximilian Zollneritsch", every later extraction of "Max" has to
+	// land on that entity instead of splitting the person again.
+	var aliasID uuid.UUID
+	err := p.pool.QueryRow(ctx, `
+		SELECT entity_id FROM entity_aliases WHERE alias_norm = $1
+	`, norm).Scan(&aliasID)
+	if err == nil {
+		return aliasID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		slog.Warn("alias lookup failed, falling through to upsert", "name", name, "err", err)
+	}
+
 	// Identity is the normalised name; the first spelling seen stays as the
 	// display name, so a later "ACME" resolves to the existing node rather
 	// than renaming it.
 	var id uuid.UUID
-	err := p.pool.QueryRow(ctx, `
+	err = p.pool.QueryRow(ctx, `
 		INSERT INTO entities (name, name_norm, entity_type)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (name_norm) DO UPDATE SET entity_type = EXCLUDED.entity_type
@@ -286,14 +303,127 @@ func (p *Postgres) UpsertEntity(ctx context.Context, name, entityType string) (u
 	return id, err
 }
 
-func (p *Postgres) UpsertRelation(ctx context.Context, fromID, toID uuid.UUID, relationship string, memoryID uuid.UUID, confidence float64) error {
+// ListEntities returns graph nodes with the counts that show whether each one
+// earns its place, most connected first. A non-empty query filters by name.
+func (p *Postgres) ListEntities(ctx context.Context, query string, limit int) ([]memory.EntityStat, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT e.id, e.name, e.entity_type,
+		       (SELECT count(*) FROM relations r WHERE r.from_entity = e.id OR r.to_entity = e.id),
+		       (SELECT count(*) FROM memory_entities me WHERE me.entity_id = e.id),
+		       COALESCE((SELECT array_agg(a.alias_norm ORDER BY a.alias_norm)
+		                 FROM entity_aliases a WHERE a.entity_id = e.id), '{}')
+		FROM entities e
+		WHERE $1 = '' OR e.name_norm LIKE '%' || $1 || '%'
+		ORDER BY 4 DESC, 5 DESC, e.name
+		LIMIT $2
+	`, memory.NormalizeName(query), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []memory.EntityStat
+	for rows.Next() {
+		var e memory.EntityStat
+		if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.Relations, &e.Memories, &e.Aliases); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// MergeEntities folds loser into winner: every memory link and every edge is
+// repointed, the loser's name (and anything already aliased to it) becomes an
+// alias of the winner, and the loser is deleted.
+//
+// This is the runtime form of the merge migrations 007 and 009 run in bulk. It
+// is not reversible -- which is why nothing calls it automatically.
+func (p *Postgres) MergeEntities(ctx context.Context, loserID, winnerID uuid.UUID) error {
+	if loserID == winnerID {
+		return fmt.Errorf("cannot merge an entity into itself")
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
+
+	// The loser's name has to become an alias before the row goes, and the
+	// aliases already pointing at it move across with it.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO entity_aliases (alias_norm, entity_id)
+		SELECT e.name_norm, $2 FROM entities e WHERE e.id = $1
+		ON CONFLICT (alias_norm) DO UPDATE SET entity_id = EXCLUDED.entity_id
+	`, loserID, winnerID); err != nil {
+		return fmt.Errorf("record alias: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE entity_aliases SET entity_id = $2 WHERE entity_id = $1
+	`, loserID, winnerID); err != nil {
+		return fmt.Errorf("repoint aliases: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO memory_entities (memory_id, entity_id)
+		SELECT me.memory_id, $2 FROM memory_entities me WHERE me.entity_id = $1
+		ON CONFLICT DO NOTHING
+	`, loserID, winnerID); err != nil {
+		return fmt.Errorf("repoint memory links: %w", err)
+	}
+
+	// Edges are grouped before insert for the same reason migration 007 groups
+	// them: two edges that differed only by which node they touched collapse
+	// onto one key here, and ON CONFLICT DO UPDATE refuses to hit one row twice
+	// in a statement. Symmetric predicates get their endpoints re-ordered, since
+	// the merge can leave an edge pointing the wrong way round.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO relations (from_entity, to_entity, relationship, relationship_raw, memory_id, confidence)
+		SELECT o.f, o.t, o.rel,
+		       (array_agg(o.raw ORDER BY o.conf DESC))[1],
+		       (array_agg(o.mem ORDER BY o.conf DESC))[1],
+		       max(o.conf)
+		FROM (
+		    SELECT CASE WHEN x.rel = ANY($3) AND x.f > x.t THEN x.t ELSE x.f END AS f,
+		           CASE WHEN x.rel = ANY($3) AND x.f > x.t THEN x.f ELSE x.t END AS t,
+		           x.rel, x.raw, x.mem, x.conf
+		    FROM (
+		        SELECT CASE WHEN r.from_entity = $1 THEN $2 ELSE r.from_entity END AS f,
+		               CASE WHEN r.to_entity   = $1 THEN $2 ELSE r.to_entity   END AS t,
+		               r.relationship AS rel, r.relationship_raw AS raw,
+		               r.memory_id AS mem, r.confidence AS conf
+		        FROM relations r
+		        WHERE r.from_entity = $1 OR r.to_entity = $1
+		    ) x
+		    WHERE x.f <> x.t
+		) o
+		GROUP BY o.f, o.t, o.rel
+		ON CONFLICT (from_entity, to_entity, relationship)
+		DO UPDATE SET confidence = GREATEST(relations.confidence, EXCLUDED.confidence)
+	`, loserID, winnerID, memory.SymmetricRelationships()); err != nil {
+		return fmt.Errorf("repoint relations: %w", err)
+	}
+
+	// The loser's own rows in both tables go with it, by ON DELETE CASCADE.
+	if _, err := tx.Exec(ctx, `DELETE FROM entities WHERE id = $1`, loserID); err != nil {
+		return fmt.Errorf("delete merged entity: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+// UpsertRelation writes one edge. relationship must already be folded onto the
+// closed vocabulary; rawRelationship keeps the extractor's own wording, which is
+// the only record of what the model actually said once the fold has run.
+func (p *Postgres) UpsertRelation(ctx context.Context, fromID, toID uuid.UUID, relationship, rawRelationship string, memoryID uuid.UUID, confidence float64) error {
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO relations (from_entity, to_entity, relationship, memory_id, confidence)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO relations (from_entity, to_entity, relationship, relationship_raw, memory_id, confidence)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (from_entity, to_entity, relationship)
 		DO UPDATE SET confidence = GREATEST(relations.confidence, EXCLUDED.confidence),
 		              memory_id  = EXCLUDED.memory_id
-	`, fromID, toID, relationship, memoryID, confidence)
+	`, fromID, toID, relationship, rawRelationship, memoryID, confidence)
 	return err
 }
 
@@ -358,10 +488,34 @@ func (p *Postgres) GetGraph(ctx context.Context, entityName string, depth int) (
 	return g, nil
 }
 
-func (p *Postgres) GetFullGraph(ctx context.Context) (*memory.Graph, error) {
+// weakEntityCondition matches an entity that has not earned a place in the
+// graph: it is typed as the fallback, one relation is all it has, and only one
+// memory ever named it. That describes the abstract noun phrases the extractor
+// emits against instructions -- "layered approach", "bulk assign", "freed
+// capacity" -- which made up over half the corpus's nodes and connect nothing.
+//
+// It is a filter rather than a delete: an entity that is genuinely new starts
+// out looking exactly like this, and earns its way in as soon as a second
+// memory or a second relation arrives.
+const weakEntityCondition = `(
+	e.entity_type = 'concept'
+	AND (SELECT count(*) FROM relations r WHERE r.from_entity = e.id OR r.to_entity = e.id) <= 1
+	AND (SELECT count(*) FROM memory_entities me WHERE me.entity_id = e.id) <= 1
+)`
+
+// GetFullGraph returns the whole graph. Weak entities are left out unless
+// includeWeak is set; the graph page exposes that as a toggle so the hidden
+// half stays reachable.
+func (p *Postgres) GetFullGraph(ctx context.Context, includeWeak bool) (*memory.Graph, error) {
 	g := &memory.Graph{Nodes: []memory.Entity{}, Edges: []memory.Relation{}}
 
-	rows, err := p.pool.Query(ctx, `SELECT id, name, entity_type FROM entities ORDER BY name`)
+	nodeQuery := `SELECT e.id, e.name, e.entity_type FROM entities e`
+	if !includeWeak {
+		nodeQuery += ` WHERE NOT ` + weakEntityCondition
+	}
+	nodeQuery += ` ORDER BY e.name`
+
+	rows, err := p.pool.Query(ctx, nodeQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -378,12 +532,16 @@ func (p *Postgres) GetFullGraph(ctx context.Context) (*memory.Graph, error) {
 	}
 
 	if len(nodeIDs) > 0 {
+		// Both endpoints must be present, or the client draws an edge to a node
+		// it was never given. This held even before the filter existed: the
+		// query used to fetch every relation regardless of the nodes returned.
 		erows, err := p.pool.Query(ctx, `
 			SELECT r.id, fe.name, te.name, r.relationship, r.confidence
 			FROM relations r
 			JOIN entities fe ON fe.id = r.from_entity
 			JOIN entities te ON te.id = r.to_entity
-		`)
+			WHERE r.from_entity = ANY($1) AND r.to_entity = ANY($1)
+		`, nodeIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -413,7 +571,7 @@ func (p *Postgres) GetGraphForMemories(ctx context.Context, memoryIDs []uuid.UUI
 		SELECT DISTINCT e.id, e.name, e.entity_type
 		FROM memory_entities me
 		JOIN entities e ON e.id = me.entity_id
-		WHERE me.memory_id = ANY($1)
+		WHERE me.memory_id = ANY($1) AND NOT `+weakEntityCondition+`
 	`, memoryIDs)
 	if err != nil {
 		return nil, fmt.Errorf("get entities for memories: %w", err)

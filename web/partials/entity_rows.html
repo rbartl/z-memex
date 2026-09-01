@@ -1,0 +1,20 @@
+{{ define "entity_rows.html" }} {{ if .Entities }} {{ range .Entities }}
+<tr>
+    <td>{{ .Name }}</td>
+    <td><span class="tag">{{ .Type }}</span></td>
+    <td>{{ .Relations }}</td>
+    <td>{{ .Memories }}</td>
+    <td>
+        {{ range .Aliases }}<span class="tag">{{ . }}</span>{{ end }}
+    </td>
+    <td style="text-align:right;">
+        <a class="btn btn-secondary btn-sm" href="/ui/entities/{{ .ID }}/merge"
+            >Merge…</a
+        >
+    </td>
+</tr>
+{{ end }} {{ else }}
+<tr>
+    <td colspan="6" class="empty">No entities found.</td>
+</tr>
+{{ end }} {{ end }}

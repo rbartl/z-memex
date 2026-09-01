@@ -54,13 +54,17 @@ Vector search uses an **HNSW** index. Because an HNSW scan returns at most `hnsw
 
 Every stored memory is automatically analyzed to extract entities and relationships. Cross-memory connections are discovered by comparing semantically similar memories. The graph is explorable via MCP tools and the web UI.
 
-Entity identity is the **normalized** name — lowercased, whitespace-collapsed — not the literal one. Names come from an LLM, which capitalizes the same thing differently between calls, so `Acme` and `ACME` used to become two nodes and split the facts about one organization across both. The first spelling seen is kept for display. Tags are folded the same way, since clients choose them freely. Migration `007` backfills this and merges the duplicates it finds, keeping the variant that carried the most memory links.
+Entity identity is the **normalized** name, not the literal one. Names come from an LLM, which spells the same thing differently between calls, so one node used to split four ways. `NormalizeName` folds all of it: case (`Acme` / `ACME`), a trailing gloss (`Go` / `Go (Golang)`), separator style (`acme-invoice-sync` / `Acme Invoice Sync`) and stray quoting (`'Sprint Review'`). It deliberately stops there — folding every punctuation mark would collapse `C++` and `C#` onto `c`. The first spelling seen is kept for display. Tags are folded the same way, since clients choose them freely. Migrations `007` and `009` backfill this and merge the duplicates they find, keeping the variant that carried the most memory links.
 
-Entity types come from a **closed vocabulary** (`memory.EntityTypes`): `person`, `organization`, `team`, `role`, `project`, `product`, `technology`, `tool`, `file`, `event`, `location`, `metric`, `concept`. The prompt used to end with "if none fit, invent a short lowercase singular noun", and validation only checked that a type looked like a slug, so the corpus reached 43 types — a useful core followed by `substance`, `timezone`, `cms`, `alias`. Migration `008` folds the historical values onto the list and adds a CHECK constraint, so adding a type now means writing a migration. A type outside the vocabulary is mapped to `concept` and logged rather than dropping the relation, since a mislabelled edge is a smaller loss than a missing one.
+**Aliases** are the half of identity normalization cannot reach. `Max`, `Maximilian`, `Maximilian Zollneritsch` and `User` were one person holding 91, 40, 43 and 36 edges across four nodes; no amount of string folding says they are the same, only someone who knows the domain can. Merging two entities in the UI moves every edge and memory link onto the survivor and records the loser's name in `entity_aliases`, so later extractions of that name resolve to the survivor instead of splitting it again. Nothing writes aliases automatically — auto-merging on name similarity is how two real people with similar names become one.
+
+Relationship predicates come from a **closed vocabulary** (`memory.Relationships`), for the same reason entity types do and with a worse symptom: "a short verb phrase" produced 503 distinct labels over 1272 edges, 341 used exactly once, with `holds`, `holds role` and `holds-role` sitting on one pair of nodes as three separate edges. Each predicate has one canonical direction, and the inverse spellings a model reaches for (`employs`, `used-by`, `led-by`) fold onto it with the endpoints swapped — which is what collapses the 111 facts that were stored in both directions at once. Symmetric predicates get a fixed endpoint order for the same reason. The model's own wording survives in `relations.relationship_raw`, so folding loses nothing. Migration `010` applies all of it to the existing corpus: 503 labels down to 28, self-edges gone, duplicate reciprocal edges gone.
+
+Entity types come from a **closed vocabulary** (`memory.EntityTypes`): `person`, `organization`, `team`, `role`, `project`, `product`, `technology`, `tool`, `file`, `event`, `location`, `metric`, `concept`. The prompt is offered every type except `concept` (`memory.PromptEntityTypes`): naming the catch-all made it the cheap answer, and 35% of the corpus landed there. `concept` remains the internal fallback for a type the model coins anyway. The prompt used to end with "if none fit, invent a short lowercase singular noun", and validation only checked that a type looked like a slug, so the corpus reached 43 types — a useful core followed by `substance`, `timezone`, `cms`, `alias`. Migration `008` folds the historical values onto the list and adds a CHECK constraint, so adding a type now means writing a migration. A type outside the vocabulary is mapped to `concept` and logged rather than dropping the relation, since a mislabelled edge is a smaller loss than a missing one.
 
 The prompt also now states what qualifies as an entity — a specific named thing that could plausibly appear in an unrelated note — and explicitly rejects the abstract noun phrases ("reduced overhead", "the attached spreadsheet") that made up much of the graph.
 
-What this does **not** fix is the entities already extracted under the old prompt. The type mapping relabels them, but a noun phrase relabelled `concept` is still a noun phrase, and 54% of entities are linked to exactly one memory — they cannot connect anything. Clearing that out means re-extracting existing memories against the new prompt, which is a separate job.
+The entities already extracted under the old prompt are **hidden rather than deleted**. An entity is *weak* when it is typed `concept`, carries at most one edge, and is named by at most one memory — which described 169 of 828 nodes, the "layered approach" and "bulk assign" end of the corpus. The graph leaves those out by default; the Graph page has a *Show unconnected concepts* toggle that brings them back. Filtering rather than deleting matters because a genuinely new entity starts out looking exactly like a weak one, and earns its way in as soon as a second memory or a second relation arrives.
 
 ### Database Migrations
 
@@ -170,7 +174,8 @@ Each memory records the client that stored it. On `initialize` the server assign
 Available at `http://localhost:3000/ui`. Unauthenticated visits land on a sign-in form; the credentials are `UI_USER` / `UI_PASS`.
 
 - **Memories** — browse and search with semantic search, or open a memory for detail (importance, access count, last accessed, related memories grouped by shared entity)
-- **Graph** — explore the interactive knowledge graph (D3.js), filtered by entity
+- **Graph** — explore the interactive knowledge graph (D3.js), filtered by entity. Weak single-mention nodes are hidden unless *Show unconnected concepts* is ticked
+- **Entities** — every node with its edge and memory counts, and the merge flow for folding two names for one thing into a single entity
 - **Chat** — RAG chat against your knowledge base, streaming token-by-token with the retrieved memories cited as sources. Models that emit reasoning tokens show their thinking separately.
 
 Each chat turn first asks the model to rewrite your question into a search query, so follow-ups resolve pronouns against the earlier conversation ("what does *he* work on?"). That rewrite is only ever an optimization: if the model returns nothing usable, your own words are used instead, and retrieval always runs. It used to be able to answer "no lookup needed" and skip retrieval altogether, which meant one uncooperative response silently hid the entire knowledge base from the model.
@@ -201,6 +206,12 @@ npm install && npm run build   # re-vendor browser assets into web/static/vendor
 ```
 
 The server resolves `migrations/` and `web/` relative to the working directory, so run it from the repository root.
+
+The entity-merge tests in `internal/storage` write to a real database and are skipped unless `MEMEX_TEST_POSTGRES` names one. Point it at a throwaway copy, never the live database — a copy of the real corpus is the useful thing to test a migration against:
+
+```bash
+docker exec memex-postgres-1 psql -U memex -d postgres -c "CREATE DATABASE memex_test TEMPLATE memex"
+```
 
 ### Continuous integration
 

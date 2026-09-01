@@ -146,10 +146,23 @@ smoke:
         sleep 1
       done
     - curl -sf http://127.0.0.1:3000/health | grep -q '"status":"ok"'
-    # Renders every page template through the real handler.
-    - curl -sf -u "$UI_USER:$UI_PASS" -o /dev/null http://127.0.0.1:3000/ui
-    # ... and the UI is not reachable without credentials.
-    - test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/ui)" = "401"
+    # The UI is not reachable without a session. It answers a browser with a
+    # redirect to the login form, not a 401 -- this asserted 401 from the days
+    # of basic auth and silently outlived it.
+    - test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/ui)" = "303"
+    # Sign in the way a browser does and keep the session cookie. Passing
+    # credentials with -u proved nothing once basic auth was gone: the handler
+    # ignored them and answered 303, which curl does not treat as a failure.
+    - |
+      curl -sf -c cookies.txt -o /dev/null -X POST http://127.0.0.1:3000/ui/login \
+        --data-urlencode "username=$UI_USER" --data-urlencode "password=$UI_PASS"
+    # Renders every page template, and the htmx partials, through the real
+    # handler -- a template that fails to parse or execute fails the job.
+    - |
+      for page in /ui /ui/graph /ui/entities /ui/chat /ui/setup /ui/queue /ui/entities/rows; do
+        code="$(curl -s -b cookies.txt -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000$page")"
+        test "$code" = "200" || { echo "$page returned $code, want 200"; exit 1; }
+      done
     # The MCP surface answers, and only with a valid token.
     - |
       curl -sf -X POST http://127.0.0.1:3000/mcp \

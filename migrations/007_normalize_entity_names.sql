@@ -3,7 +3,7 @@
 -- Entity names come from an LLM, which capitalises the same thing differently
 -- from call to call. entities_name_key is UNIQUE on name, and Postgres compares
 -- text case-sensitively, so "Acme" and "ACME" became two nodes by
--- construction -- as did three spellings of "Platform Team". Every fact
+-- construction -- as did three spellings of another organisation. Every fact
 -- about the thing was then split across those nodes, and a traversal arriving
 -- at one variant could not see anything attached to the other.
 --

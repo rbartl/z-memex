@@ -166,11 +166,28 @@ type ScoringConfig struct {
 //
 // FullTextAny looks wrong at first glance — ORing every term matches a large
 // slice of the corpus — but measurement disagrees: it beats requiring all
-// terms and beats pure vector search by a wide margin. Natural questions
-// rarely share every term with the memory that answers them, so AND semantics
-// leave the lexical half silent and throw its contribution away.
+// terms. Natural questions rarely share every term with the memory that
+// answers them, so AND semantics leave the lexical half silent and throw its
+// contribution away.
 //
-// Re-measure with cmd/rankeval before changing any of this.
+// Against pure vector search the choice is a genuine trade-off rather than a
+// win, and it changed when the embedder did. Under bge-m3, on 26 hand-written
+// questions:
+//
+//	          MRR    R@1    R@5    R@10   missed
+//	any      0.687  0.538  0.885  1.000  0
+//	off      0.804  0.731  0.846  0.962  1
+//
+// FullTextOff ranks better — it puts the right memory first far more often —
+// but it loses one answer completely, and recall_memory hands its whole result
+// set to a model that reads all of it. A memory ranked fourth is still read; a
+// memory that is not returned is invisible, and the tool answers "nothing
+// found" to a question the corpus can answer. The rarer, worse failure wins the
+// argument, so the lexical half stays.
+//
+// Re-measure with cmd/rankeval before changing any of this — and on
+// hand-written questions, since generated ones rank both models and modes
+// differently.
 var DefaultScoringConfig = ScoringConfig{
 	RRFConstant:         10,
 	CandidateK:          100,

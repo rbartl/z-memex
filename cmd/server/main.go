@@ -50,7 +50,17 @@ func main() {
 	defer pg.Close()
 
 	ollamaURL := mustEnv("OLLAMA_URL")
-	embedder := embeddings.NewOllama(ollamaURL, "nomic-embed-text")
+
+	// bge-m3 replaced nomic-embed-text after cmd/rankeval measured five models
+	// against a copy of a real corpus; see migration 012 for the numbers. The
+	// model must match the width migration 012 declared, which the backfill
+	// below refuses to start without.
+	embedModel := os.Getenv("EMBED_MODEL")
+	if embedModel == "" {
+		embedModel = "bge-m3"
+	}
+	embedder := embeddings.NewOllama(ollamaURL, embedModel)
+	slog.Info("using embedding model", "model", embedModel)
 
 	var extractor memory.Extractor
 	switch os.Getenv("EXTRACTOR") {
@@ -70,6 +80,17 @@ func main() {
 	svc := memory.NewServiceWithConfig(pg, embedder, extractor, memory.ExtractionConfig{
 		Workers: envInt("EXTRACTION_WORKERS"),
 	})
+
+	// A migration that changes the embedding width leaves the corpus without
+	// vectors, so this runs before the server accepts traffic: a knowledge base
+	// that answers every search with nothing is worse than one that is briefly
+	// unavailable. It is a no-op once the corpus is embedded.
+	if n, err := svc.BackfillEmbeddings(ctx); err != nil {
+		slog.Error("failed to backfill embeddings", "embedded", n, "err", err)
+		os.Exit(1)
+	} else if n > 0 {
+		slog.Info("backfilled embeddings", "count", n, "model", embedModel)
+	}
 
 	chatModel := os.Getenv("OLLAMA_CHAT_MODEL")
 	if chatModel == "" {

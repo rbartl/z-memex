@@ -77,12 +77,14 @@ Schema changes are managed by [goose](https://github.com/pressly/goose) and run 
 - An Anthropic API key — **only** if you set `EXTRACTOR=anthropic`
 
 ```bash
-ollama pull nomic-embed-text   # embeddings — required, model name is fixed
+ollama pull bge-m3             # embeddings (EMBED_MODEL)
 ollama pull gemma4:26b         # relationship extraction (OLLAMA_EXTRACT_MODEL)
 ollama pull llama3.2           # chat UI (OLLAMA_CHAT_MODEL)
 ```
 
-The extraction and chat models are configurable — pull whatever you prefer and set the matching variable. Only `nomic-embed-text` is hardcoded, because the schema fixes the embedding dimension at 768.
+All three models are configurable. The embedding model is the constrained one: the schema declares a fixed vector width (1024 since migration `012`), so `EMBED_MODEL` may only name a model of that width — the server checks at startup and refuses to run on a mismatch rather than failing one insert at a time. Changing width means a migration; the corpus is then re-embedded automatically on the next boot.
+
+`bge-m3` was chosen by measurement, not reputation. `cmd/rankeval` compared five local models against a copy of a real corpus on 26 hand-written questions: bge-m3 led on MRR (0.687 `any` / 0.804 `off`) and R@1 (0.73), missed nothing, and cut the share of unanswerable queries that outscore a 90%-recall threshold from 75% to 8%. `mxbai-embed-large` came close but has a 512-token context and rejects longer memories outright. Judge on hand-written questions only: on LLM-generated ones the models rank almost in reverse, because a generated question echoes the wording of the memory that answers it.
 
 ## Setup
 
@@ -105,6 +107,7 @@ Postgres is published on `5433` for psql access; the server listens on `3000`.
 | `UI_USER` | yes | `admin` | Web UI login user |
 | `UI_PASS` | yes | `password` | Web UI login password — change this |
 | `EXTRACTOR` | no | `ollama` | `ollama` or `anthropic` |
+| `EMBED_MODEL` | no | `bge-m3` | Embedding model. Must produce the width the schema declares (1024 since migration `012`) |
 | `OLLAMA_EXTRACT_MODEL` | no | `gemma4:26b` | Model used for entity/relationship extraction |
 | `OLLAMA_CHAT_MODEL` | no | `llama3.2` | Model backing the chat UI |
 | `ANTHROPIC_API_KEY` | only if `EXTRACTOR=anthropic` | — | Extraction runs on Haiku, billed per memory |

@@ -29,6 +29,7 @@ services:
       UI_USER: ${UI_USER:-admin}
       UI_PASS: ${UI_PASS:-password}
       EXTRACTOR: ${EXTRACTOR:-ollama}
+      EMBED_MODEL: ${EMBED_MODEL:-}
       OLLAMA_EXTRACT_MODEL: ${OLLAMA_EXTRACT_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-}

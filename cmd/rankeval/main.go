@@ -64,7 +64,7 @@ func main() {
 		sweep      = flag.Bool("sweep", false, "sweep the fusion balance instead of comparing tsquery modes")
 		baseline   = flag.String("baseline", "", "variant to diff against (default: first)")
 		candidate  = flag.String("candidate", "", "variant to diff (default: best MRR)")
-		embedModel = flag.String("embed", "nomic-embed-text", "embedding model to evaluate with")
+		embedModel = flag.String("embed", "bge-m3", "embedding model to evaluate with")
 		doReembed  = flag.Bool("reembed", false, "rewrite every stored embedding with -embed, resizing the column (copies only)")
 		sepOnly    = flag.Bool("separation", false, "only measure whether answerable and unanswerable queries separate")
 	)

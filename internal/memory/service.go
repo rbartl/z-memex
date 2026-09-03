@@ -45,6 +45,9 @@ type Store interface {
 	GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) ([]RelatedMemory, error)
 	ListEntities(ctx context.Context, query string, limit int) ([]EntityStat, error)
 	MergeEntities(ctx context.Context, loserID, winnerID uuid.UUID) error
+	EmbeddingDimension(ctx context.Context) (int, error)
+	MemoriesMissingEmbedding(ctx context.Context, limit int) ([]*Memory, error)
+	SetEmbedding(ctx context.Context, id uuid.UUID, embedding []float32) error
 }
 
 type Service struct {
@@ -68,6 +71,58 @@ func NewServiceWithConfig(store Store, embed Embedder, extract Extractor, cfg Ex
 	s.queue = newExtractionQueue(cfg, s.runExtraction)
 	slog.Info("extraction queue started", "workers", cfg.Workers)
 	return s
+}
+
+// embeddingBackfillBatch bounds how many memories are held in memory at once
+// while re-embedding. The work is one model call per memory either way.
+const embeddingBackfillBatch = 100
+
+// BackfillEmbeddings embeds every memory that has no vector, and reports how
+// many it wrote. Rows arrive here after migration 012 discards the corpus's
+// embeddings, and after any store whose embedding call failed.
+//
+// It first checks the configured model against the column's declared width. A
+// mismatch cannot be recovered from at runtime -- every insert would fail on
+// the dimension check -- so the caller is expected to treat the error as fatal
+// rather than serve a knowledge base that cannot be searched.
+func (s *Service) BackfillEmbeddings(ctx context.Context) (int, error) {
+	want, err := s.store.EmbeddingDimension(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read embedding dimension: %w", err)
+	}
+	probe, err := s.embed.Embed(ctx, "dimension probe")
+	if err != nil {
+		return 0, fmt.Errorf("probe embedding model: %w", err)
+	}
+	if len(probe) != want {
+		return 0, fmt.Errorf("embedding model returns %d dimensions but the schema declares %d: "+
+			"set EMBED_MODEL to the model this schema was migrated for, or migrate the column", len(probe), want)
+	}
+
+	var done int
+	for {
+		batch, err := s.store.MemoriesMissingEmbedding(ctx, embeddingBackfillBatch)
+		if err != nil {
+			return done, fmt.Errorf("list memories missing embeddings: %w", err)
+		}
+		if len(batch) == 0 {
+			return done, nil
+		}
+
+		for _, m := range batch {
+			vec, err := s.embed.Embed(ctx, m.Content)
+			if err != nil {
+				return done, fmt.Errorf("embed memory %s: %w", m.ID, err)
+			}
+			if err := s.store.SetEmbedding(ctx, m.ID, vec); err != nil {
+				return done, fmt.Errorf("store embedding %s: %w", m.ID, err)
+			}
+			done++
+			if done%25 == 0 {
+				slog.Info("backfilling embeddings", "done", done)
+			}
+		}
+	}
 }
 
 // ExtractionQueueStats reports how much background extraction work is

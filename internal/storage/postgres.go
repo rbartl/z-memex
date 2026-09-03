@@ -699,6 +699,53 @@ func (p *Postgres) GetRelatedMemories(ctx context.Context, memoryID uuid.UUID) (
 	return result, nil
 }
 
+// EmbeddingDimension reports the width the embedding column is declared with.
+// atttypmod carries it for pgvector, and a mismatch against the configured
+// model is a misconfiguration worth refusing to start on rather than
+// discovering one failed insert at a time.
+func (p *Postgres) EmbeddingDimension(ctx context.Context) (int, error) {
+	var dim int
+	err := p.pool.QueryRow(ctx, `
+		SELECT atttypmod
+		FROM pg_attribute
+		WHERE attrelid = 'memories'::regclass AND attname = 'embedding'
+	`).Scan(&dim)
+	return dim, err
+}
+
+// MemoriesMissingEmbedding returns memories that have no vector yet, oldest
+// first. Rows land here after a migration that changes the embedding width, and
+// after any store whose embedding call failed.
+func (p *Postgres) MemoriesMissingEmbedding(ctx context.Context, limit int) ([]*memory.Memory, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT id, content FROM memories
+		WHERE embedding IS NULL
+		ORDER BY created_at
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*memory.Memory
+	for rows.Next() {
+		m := &memory.Memory{}
+		if err := rows.Scan(&m.ID, &m.Content); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SetEmbedding stores a vector for one memory, leaving every other column
+// alone -- unlike SaveMemory, which rewrites the row.
+func (p *Postgres) SetEmbedding(ctx context.Context, id uuid.UUID, embedding []float32) error {
+	_, err := p.pool.Exec(ctx, `UPDATE memories SET embedding = $2 WHERE id = $1`, id, pgvector.NewVector(embedding))
+	return err
+}
+
 func (p *Postgres) UpdateSummary(ctx context.Context, id uuid.UUID, summary string) error {
 	_, err := p.pool.Exec(ctx, `UPDATE memories SET summary = $2, updated_at = NOW() WHERE id = $1`, id, summary)
 	return err

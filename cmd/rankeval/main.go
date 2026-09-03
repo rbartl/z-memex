@@ -53,17 +53,20 @@ type Case struct {
 
 func main() {
 	var (
-		dbURL     = flag.String("db", "postgres://memex:memex@localhost:55432/memex?sslmode=disable", "database to evaluate against (use a copy, not production)")
-		ollamaURL = flag.String("ollama", "http://localhost:11434", "Ollama endpoint")
-		genModel  = flag.String("model", "qwen3.5:9b", "model used to generate questions")
-		setPath   = flag.String("set", "eval.json", "labelled question set")
-		outPath   = flag.String("out", "eval.json", "where -generate writes its output")
-		generate  = flag.Bool("generate", false, "generate a question set from the memories in -db")
-		limit     = flag.Int("limit", 0, "generate at most this many cases (0 = all memories)")
-		topK      = flag.Int("topk", 10, "how many results to retrieve per query")
-		sweep     = flag.Bool("sweep", false, "sweep the fusion balance instead of comparing tsquery modes")
-		baseline  = flag.String("baseline", "", "variant to diff against (default: first)")
-		candidate = flag.String("candidate", "", "variant to diff (default: best MRR)")
+		dbURL      = flag.String("db", "postgres://memex:memex@localhost:55432/memex?sslmode=disable", "database to evaluate against (use a copy, not production)")
+		ollamaURL  = flag.String("ollama", "http://localhost:11434", "Ollama endpoint")
+		genModel   = flag.String("model", "qwen3.5:9b", "model used to generate questions")
+		setPath    = flag.String("set", "eval.json", "labelled question set")
+		outPath    = flag.String("out", "eval.json", "where -generate writes its output")
+		generate   = flag.Bool("generate", false, "generate a question set from the memories in -db")
+		limit      = flag.Int("limit", 0, "generate at most this many cases (0 = all memories)")
+		topK       = flag.Int("topk", 10, "how many results to retrieve per query")
+		sweep      = flag.Bool("sweep", false, "sweep the fusion balance instead of comparing tsquery modes")
+		baseline   = flag.String("baseline", "", "variant to diff against (default: first)")
+		candidate  = flag.String("candidate", "", "variant to diff (default: best MRR)")
+		embedModel = flag.String("embed", "nomic-embed-text", "embedding model to evaluate with")
+		doReembed  = flag.Bool("reembed", false, "rewrite every stored embedding with -embed, resizing the column (copies only)")
+		sepOnly    = flag.Bool("separation", false, "only measure whether answerable and unanswerable queries separate")
 	)
 	flag.Parse()
 
@@ -74,6 +77,16 @@ func main() {
 		log.Fatalf("connect: %v", err)
 	}
 	defer store.Close()
+
+	embedder := embeddings.NewOllama(*ollamaURL, *embedModel)
+
+	if *doReembed {
+		if err := reembed(ctx, *dbURL, embedder, *embedModel); err != nil {
+			log.Fatalf("reembed: %v", err)
+		}
+		fmt.Println("done")
+		return
+	}
 
 	if *generate {
 		if err := generateSet(ctx, store, *ollamaURL, *genModel, *outPath, *limit); err != nil {
@@ -86,7 +99,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("load %s: %v", *setPath, err)
 	}
-	fmt.Printf("%d labelled queries against %s\n\n", len(cases), *dbURL)
+	fmt.Printf("%d labelled queries against %s (embedder: %s)\n\n", len(cases), *dbURL, *embedModel)
+
+	if *sepOnly {
+		// The corpus is small enough to scan whole; asking for more rows than
+		// exist is harmless and guarantees the target is scored.
+		measureSeparation(ctx, store, embedder, *embedModel, cases, defaultDistractors, 1000).report()
+		return
+	}
 
 	variants := modeVariants()
 	if *sweep {
@@ -98,8 +118,8 @@ func main() {
 		base = variants[0].name
 	}
 
-	embedder := embeddings.NewOllama(*ollamaURL, "nomic-embed-text")
 	evaluate(ctx, store, embedder, cases, *topK, variants, base, cand)
+	measureSeparation(ctx, store, embedder, *embedModel, cases, defaultDistractors, 1000).report()
 }
 
 // --- evaluation ---

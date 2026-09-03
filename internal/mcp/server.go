@@ -337,9 +337,7 @@ YOU SHOULD PROACTIVELY CALL THIS TOOL:
 - When the user asks about something that may have been discussed in a **previous session**
 - When you need to recall **user preferences, decisions, or project details**
 
-The response includes:
-- **memories**: ranked results with content and similarity scores
-- **graph**: entities and relationships extracted from those memories (e.g. "Go" --uses--> "chi router")`,
+The response is compact text: each memory with its relevance score, id, importance, source, date and tags, followed by the strongest relationships between the entities those memories mention (e.g. "Go --uses--> chi router").`,
 				"inputSchema": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -449,8 +447,7 @@ func (s *Server) toolRecallMemory(ctx context.Context, args map[string]any) (any
 		return nil, err
 	}
 
-	out, _ := json.MarshalIndent(result, "", "  ")
-	return toolResult(string(out)), nil
+	return toolResult(formatRecall(query, result)), nil
 }
 
 func (s *Server) toolManageMemories(ctx context.Context, args map[string]any) (any, error) {

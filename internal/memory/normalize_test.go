@@ -25,8 +25,10 @@ func TestNormalizeName(t *testing.T) {
 	}
 }
 
-// The variants below are real pairs from the live corpus, where they had become
-// separate entities and separate tags.
+// The shapes below are the ones that split an entity in two before this
+// existed: a name that differs only by case, a lowercase first name beside its
+// capitalised form, a hyphenated word, a phrase whose first word is capitalised
+// in one memory and not the next.
 func TestNormalizeNameCollapsesRealVariants(t *testing.T) {
 	groups := [][]string{
 		{"Acme", "ACME"},

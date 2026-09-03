@@ -70,10 +70,33 @@ func reembed(ctx context.Context, dbURL string, embedder *embeddings.Ollama, mod
 	}
 	rows.Close()
 
+	var truncated int
 	for i, r := range all {
 		v, err := embedder.Embed(ctx, r.content)
 		if err != nil {
-			return fmt.Errorf("embed memory %s: %w", r.id, err)
+			// Some embedders have a short context -- mxbai-embed-large stops at
+			// 512 tokens and rejects the whole input rather than truncating it.
+			// Retry on a prefix so one long memory does not end the run, and
+			// count it: a model that truncates is not really reading the corpus,
+			// which is a finding about the model, not a detail of the tool.
+			// Halve until it fits: the refusal is on tokens, and how many tokens
+			// a character buys varies with the text -- URLs, code and German
+			// compounds all tokenize densely.
+			var fitted bool
+			for _, n := range embedRetryRunes {
+				short := truncateRunes(r.content, n)
+				if len(short) == len(r.content) {
+					continue
+				}
+				if v, err = embedder.Embed(ctx, short); err == nil {
+					fitted = true
+					break
+				}
+			}
+			if !fitted {
+				return fmt.Errorf("embed memory %s: %w", r.id, err)
+			}
+			truncated++
 		}
 		if _, err := pool.Exec(ctx, `UPDATE memories SET embedding = $2 WHERE id = $1`, r.id, vectorLiteral(v)); err != nil {
 			return fmt.Errorf("store embedding %s: %w", r.id, err)
@@ -86,7 +109,25 @@ func reembed(ctx context.Context, dbURL string, embedder *embeddings.Ollama, mod
 	if _, err := pool.Exec(ctx, `CREATE INDEX idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops)`); err != nil {
 		return fmt.Errorf("recreate index: %w", err)
 	}
+	if truncated > 0 {
+		fmt.Printf("WARNING: %d of %d memories did not fit %s and were embedded from a prefix only.\n",
+			truncated, len(all), model)
+	}
 	return nil
+}
+
+// embedRetryRunes are the prefix lengths tried, longest first, when a model
+// refuses a whole memory.
+var embedRetryRunes = []int{1500, 1000, 700, 450, 300}
+
+// truncateRunes cuts at a rune boundary; the corpus contains German text, so
+// slicing bytes would split a character.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // vectorLiteral renders a vector for pgvector without pulling the typed helper

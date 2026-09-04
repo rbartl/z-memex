@@ -40,17 +40,23 @@ func (s *stubStore) SetEmbedding(_ context.Context, id uuid.UUID, e []float32) e
 	return nil
 }
 
-// stubEmbedder returns a vector of a fixed width.
-type stubEmbedder struct{ dim int }
+// stubEmbedder returns a vector of a fixed width and counts its calls, so a
+// test can assert the model was never contacted.
+type stubEmbedder struct {
+	dim   int
+	calls int
+}
 
-func (e stubEmbedder) Embed(context.Context, string) ([]float32, error) {
+func (e *stubEmbedder) Embed(context.Context, string) ([]float32, error) {
+	e.calls++
 	return make([]float32, e.dim), nil
 }
 
-func newBackfillService(store Store, dim int) *Service {
-	s := &Service{store: store, embed: stubEmbedder{dim: dim}}
+func newBackfillService(store Store, dim int) (*Service, *stubEmbedder) {
+	e := &stubEmbedder{dim: dim}
+	s := &Service{store: store, embed: e}
 	s.queue = newExtractionQueue(ExtractionConfig{}, func(context.Context, extractionJob) {})
-	return s
+	return s, e
 }
 
 func TestBackfillEmbedsEveryMemoryMissingOne(t *testing.T) {
@@ -58,7 +64,7 @@ func TestBackfillEmbedsEveryMemoryMissingOne(t *testing.T) {
 	for i := 0; i < 250; i++ { // more than one batch
 		store.pending = append(store.pending, &Memory{ID: uuid.New(), Content: "a fact"})
 	}
-	svc := newBackfillService(store, 1024)
+	svc, _ := newBackfillService(store, 1024)
 	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
 
 	n, err := svc.BackfillEmbeddings(context.Background())
@@ -74,7 +80,7 @@ func TestBackfillEmbedsEveryMemoryMissingOne(t *testing.T) {
 // would fail the dimension check, so the server must refuse to start.
 func TestBackfillRejectsWrongDimension(t *testing.T) {
 	store := &stubStore{dim: 1024, pending: []*Memory{{ID: uuid.New(), Content: "a fact"}}}
-	svc := newBackfillService(store, 768)
+	svc, _ := newBackfillService(store, 768)
 	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
 
 	_, err := svc.BackfillEmbeddings(context.Background())
@@ -91,13 +97,19 @@ func TestBackfillRejectsWrongDimension(t *testing.T) {
 	}
 }
 
-func TestBackfillIsANoOpWhenNothingIsMissing(t *testing.T) {
+// The common case is a corpus that is already embedded, and on that path the
+// embedding backend must not be contacted at all: CI boots the server with no
+// Ollama reachable, and a probe there would fail the whole start-up.
+func TestBackfillDoesNotTouchTheModelWhenNothingIsMissing(t *testing.T) {
 	store := &stubStore{dim: 1024}
-	svc := newBackfillService(store, 1024)
+	svc, embedder := newBackfillService(store, 1024)
 	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
 
 	n, err := svc.BackfillEmbeddings(context.Background())
 	if err != nil || n != 0 {
 		t.Errorf("backfill on a full corpus = (%d, %v), want (0, nil)", n, err)
+	}
+	if embedder.calls != 0 {
+		t.Errorf("contacted the embedding model %d times with nothing to embed", embedder.calls)
 	}
 }

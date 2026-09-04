@@ -86,6 +86,23 @@ const embeddingBackfillBatch = 100
 // the dimension check -- so the caller is expected to treat the error as fatal
 // rather than serve a knowledge base that cannot be searched.
 func (s *Service) BackfillEmbeddings(ctx context.Context) (int, error) {
+	// Look for work before touching the model. A corpus that is fully embedded
+	// is the normal case, and on that path the server must not need the
+	// embedding backend to be reachable at all — it contacts Ollama lazily
+	// otherwise, and a boot that fails without it would take the whole service
+	// down whenever the model host is slow to start.
+	batch, err := s.store.MemoriesMissingEmbedding(ctx, embeddingBackfillBatch)
+	if err != nil {
+		return 0, fmt.Errorf("list memories missing embeddings: %w", err)
+	}
+	if len(batch) == 0 {
+		return 0, nil
+	}
+
+	// There is work, so the model's width has to agree with the column's. A
+	// mismatch cannot be recovered from at runtime — every insert would fail
+	// the dimension check — so the caller is expected to treat this as fatal
+	// rather than serve a knowledge base that cannot be searched.
 	want, err := s.store.EmbeddingDimension(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("read embedding dimension: %w", err)
@@ -101,14 +118,6 @@ func (s *Service) BackfillEmbeddings(ctx context.Context) (int, error) {
 
 	var done int
 	for {
-		batch, err := s.store.MemoriesMissingEmbedding(ctx, embeddingBackfillBatch)
-		if err != nil {
-			return done, fmt.Errorf("list memories missing embeddings: %w", err)
-		}
-		if len(batch) == 0 {
-			return done, nil
-		}
-
 		for _, m := range batch {
 			vec, err := s.embed.Embed(ctx, m.Content)
 			if err != nil {
@@ -121,6 +130,14 @@ func (s *Service) BackfillEmbeddings(ctx context.Context) (int, error) {
 			if done%25 == 0 {
 				slog.Info("backfilling embeddings", "done", done)
 			}
+		}
+
+		batch, err = s.store.MemoriesMissingEmbedding(ctx, embeddingBackfillBatch)
+		if err != nil {
+			return done, fmt.Errorf("list memories missing embeddings: %w", err)
+		}
+		if len(batch) == 0 {
+			return done, nil
 		}
 	}
 }

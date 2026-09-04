@@ -3,3 +3,8 @@
 node_modules
 .playwright-mcp
 eval.json
+
+# Written by the CI smoke job when it signs in to the UI.
+cookies.txt
+server.log
+server.pid

@@ -113,7 +113,12 @@ test:
 
 # Exercises what unit tests cannot: that the migrations apply to a real
 # pgvector database, that the templates parse, and that the HTTP surface comes
-# up behind its auth. The server contacts Ollama lazily, so none is needed.
+# up behind its auth.
+#
+# No Ollama runs here, and the server must not need one to boot. That is a real
+# constraint rather than a convenience: the startup embedding backfill contacts
+# the model only when a memory is actually missing a vector, so on the empty
+# database this job creates it never reaches for one.
 smoke:
   stage: test
   services:

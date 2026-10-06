@@ -232,7 +232,46 @@ docker exec memex-postgres-1 psql -U memex -d postgres -c "CREATE DATABASE memex
 
 `smoke` is the one that catches what unit tests cannot — it boots the actual binary against a Postgres service and checks `/health`, the UI (rendered, and rejecting anonymous requests), and an MCP `tools/list`. No Ollama is needed, because the server only contacts it lazily.
 
-`container` needs a Docker-capable runner; GitLab.com's shared runners qualify. It builds and discards — nothing is published.
+`container` needs a Docker-capable runner; GitLab.com's shared runners qualify. On branches and merge requests it builds and discards the image. On `main`, `container:push` publishes `registry.gitlab.com/zollneritsch/memex:latest` plus a tag for the commit SHA.
+
+### Releasing
+
+Releases are cut by pushing a version tag. Versions follow [Semantic Versioning](https://semver.org/), and tags carry a `v` prefix (`v0.1.0`, or `v0.2.0-rc.1` for a pre-release).
+
+There is no changelog to write. [git-cliff](https://git-cliff.org) builds the release notes from the commit messages since the previous release, so they depend on commits following [Conventional Commits](https://www.conventionalcommits.org/):
+
+| Commit | Appears under |
+|---|---|
+| `feat:` | Features |
+| `fix:` | Bug fixes |
+| `perf:` | Performance |
+| `feat!:`, or a `BREAKING CHANGE:` footer | Marked **Breaking** |
+| no type, or `polish:` | Other changes |
+| `chore:` `ci:` `docs:` `test:` `style:` `build:` `refactor:` | Left out |
+
+The grouping lives in [cliff.toml](cliff.toml). A scope is shown in bold, as in `feat(graph): ...`.
+
+1. On an up-to-date `main`, preview the notes (needs `brew install git-cliff`). The script fails if no commit since the previous release would appear in them.
+   ```bash
+   scripts/release-notes.sh v0.1.0
+   ```
+2. Tag the commit and push the tag:
+   ```bash
+   git tag -a v0.1.0 -m "memex v0.1.0"
+   ```
+   ```bash
+   git push origin v0.1.0
+   ```
+
+The tag pipeline runs the full CI, plus three release jobs:
+
+| Job | What it does |
+|---|---|
+| `release-notes` | Generates the notes. Runs first, so a tag with nothing to release fails before anything is published |
+| `container:push` | Publishes `registry.gitlab.com/zollneritsch/memex:v0.1.0` (and the commit SHA tag). `:latest` keeps tracking `main` |
+| `release` | Creates the [GitLab release](https://gitlab.com/zollneritsch/memex/-/releases) with the notes, a `docker pull` command, and a link to the container registry. The releases page is the changelog |
+
+If the pipeline fails, fix the problem on `main`, then delete the tag (`git push origin :v0.1.0`) and tag again. Once a release is published, don't move its tag; release a new patch version instead.
 
 ### Tuning retrieval
 

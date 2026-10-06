@@ -1,0 +1,45 @@
+# git-cliff configuration: turns the commits since the previous tag into the
+# release notes, so nobody writes a changelog by hand.
+# https://git-cliff.org/docs/configuration
+#
+# Commits follow Conventional Commits (feat:, fix:, ...). Housekeeping types
+# are left out; a commit without a type still lands under "Other changes",
+# because the older history has a few of those that matter.
+
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+
+{% for commit in commits -%}
+- {% if commit.breaking %}**Breaking:** {% endif %}\
+{% if commit.scope and commit.scope != "NOTASK" %}**{{ commit.scope }}:** {% endif %}\
+{{ commit.message | split(pat="\n") | first | trim | upper_first }} ({{ commit.id | truncate(length=8, end="") }})
+{% endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+"
+# Pre-release tags do not start a new range, so v1.2.0 lists everything since
+# v1.1.0 even if v1.2.0-rc.1 came in between.
+ignore_tags = "-"
+sort_commits = "oldest"
+
+# The HTML comments only order the groups; striptags removes them on output.
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^polish", group = "<!-- 3 -->Other changes" },
+  { message = "^(chore|ci|docs|test|style|build|refactor)", skip = true },
+  { message = ".*", group = "<!-- 3 -->Other changes" },
+]

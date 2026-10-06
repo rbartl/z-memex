@@ -16,5 +16,6 @@ COPY --from=builder /app/migrations ./migrations
 COPY --from=builder /app/web/templates ./web/templates
 COPY --from=builder /app/web/partials ./web/partials
 COPY --from=builder /app/web/static ./web/static
+COPY --from=builder /app/LICENSE /app/THIRD_PARTY_NOTICES ./
 EXPOSE 3000
 CMD ["./memex"]

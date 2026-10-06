@@ -259,3 +259,7 @@ The generated file contains real memory text and is gitignored.
 ## Migrating to Qdrant Later
 
 The `memory.Store` interface is the only seam. Implement it in `storage/qdrant.go`, swap in `main.go`. Data migration = `SELECT id, embedding FROM memories` → bulk upsert.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

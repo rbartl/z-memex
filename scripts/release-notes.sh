@@ -32,7 +32,7 @@ fi
 # v1.1.0 even if v1.2.0-rc.1 came in between. None for the first release.
 if prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' "$end^" 2>/dev/null); then
   set -- "$@" "$prev..$end"
-elif [ "$(git rev-parse "$end")" != "$(git rev-parse HEAD)" ]; then
+elif [ "$(git rev-parse "$end^{commit}")" != "$(git rev-parse HEAD)" ]; then
   echo "To preview the first release, check out $tag first." >&2
   exit 1
 fi
